@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -68,8 +70,9 @@ type app struct {
 	detailSeq int
 	current   int // episode index
 	job       *job
-	playing   bool // the player page is loaded with current
 	playSeq   int
+	aspects   map[string]float32 // width over height, by episode
+	theater   bool               // the player fills the window, in full screen
 	autoNext  bool
 	epRange   int // which block of 50 episodes the list shows
 }
@@ -79,10 +82,11 @@ func newApp() *app {
 		page:      "home",
 		backTo:    "home",
 		feeds:     map[string]*feed{},
+		aspects:   map[string]float32{},
 		scrolls:   map[string]*ui.ScrollState{},
 		covers:    map[string]*cover{},
 		coverWant: map[string]bool{},
-		coverSem:  make(chan struct{}, 6),
+		coverSem:  make(chan struct{}, 16),
 		lib:       newLibrary(),
 		theme:     netflixTheme(),
 		history:   loadHistory(),
@@ -175,6 +179,12 @@ func (a *app) search(q string) {
 
 // go_ shows a page.
 func (a *app) go_(page string) {
+	if a.page == "watch" && page != "watch" {
+		a.tellPlayer("smovie.pause", nil) // as streaming apps do on leaving the player
+		if a.theater {
+			a.setTheater(false)
+		}
+	}
 	if page != "watch" {
 		a.backTo = page
 	}
@@ -237,9 +247,9 @@ func (a *app) open(s hongguo.Series) {
 	start, _ := a.lastEpisode(s.ID)
 	a.series = &s
 	a.detail, a.detailErr = nil, ""
-	a.current, a.job, a.playing = -1, nil, false
-	a.epRange = start / 50
-	a.player.Page().LoadHTML(blankHTML, "")
+	a.current, a.job = -1, nil
+	a.epRange = start / epBlock
+	a.tellPlayer("smovie.pause", nil)
 	a.scroll("watch").Y = 0
 	a.detailSeq++
 	seq := a.detailSeq
@@ -272,25 +282,24 @@ func (a *app) play(index int) {
 		return
 	}
 	a.current = index
-	a.epRange = index / 50
-	a.playing = false
-	a.playSeq++
-	seq := a.playSeq
+	a.epRange = index / epBlock
 	vid := a.detail.VIDs[index]
 	total := len(a.detail.VIDs)
 	a.history = recordWatch(a.history, a.detail.Series, index, total)
 	saveHistory(append([]watched(nil), a.history...))
-	a.player.Page().LoadHTML(blankHTML, "")
 	j := a.lib.ensure(vid)
 	a.job = j
+	info := episodeInfo{VID: vid, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover}
+	a.server.setCurrent(info)
+	a.tellPlayer("smovie.load", info)
+	a.playSeq++
+	seq := a.playSeq
 	go func() {
 		<-j.done
 		a.win.Update(func() {
 			if seq != a.playSeq || j.err != nil {
 				return
 			}
-			a.playing = true
-			_ = a.player.Page().LoadURL(a.server.playerURL(vid, index+1, total))
 			// Prefetch the next episode so continuous play does not wait.
 			if next := index + 1; a.detail != nil && next < len(a.detail.VIDs) {
 				a.lib.ensure(a.detail.VIDs[next])
@@ -299,23 +308,86 @@ func (a *app) play(index int) {
 	}()
 }
 
+// tellPlayer calls a function of the player page with a JSON argument.
+// A page still loading misses it, and reads the episode from /current.
+func (a *app) tellPlayer(fn string, arg any) {
+	data, _ := json.Marshal(arg)
+	page := a.player.Page()
+	go func() { _, _ = page.Eval(fmt.Sprintf("window.smovie && %s(%s)", fn, data)) }()
+}
+
 // step plays the episode before (-1) or after (+1) vid, when vid still
 // plays: from the player's buttons and when an episode ends.
 func (a *app) step(vid string, delta int, ended bool) {
 	a.win.Update(func() {
-		if a.detail == nil || a.current < 0 || a.detail.VIDs[a.current] != vid {
-			return
-		}
-		if ended && !a.autoNext {
+		if !a.isCurrent(vid) || (ended && !a.autoNext) {
 			return
 		}
 		a.play(a.current + delta)
 	})
 }
 
+func (a *app) retry(vid string) {
+	a.win.Update(func() {
+		if a.isCurrent(vid) {
+			a.play(a.current)
+		}
+	})
+}
+
+func (a *app) meta(vid string, w, h int) {
+	a.win.Update(func() { a.aspects[vid] = float32(w) / float32(h) })
+}
+
+// fullscreen shows the player alone in a window filling the screen.
+func (a *app) fullscreen(on bool) {
+	a.win.Update(func() { a.setTheater(on) })
+}
+
+func (a *app) setTheater(on bool) {
+	if on && a.page != "watch" {
+		return
+	}
+	a.theater = on
+	if a.win.IsFullScreen() != on {
+		a.win.SetFullScreen(on)
+	}
+	a.tellPlayer("smovie.setFullscreen", on)
+	a.player.Focus()
+}
+
+func (a *app) isCurrent(vid string) bool {
+	return a.detail != nil && a.current >= 0 && a.current < len(a.detail.VIDs) && a.detail.VIDs[a.current] == vid
+}
+
+// aspect is the width over the height of the episode that plays, 16:9
+// until known.
+func (a *app) aspect() float32 {
+	if a.detail == nil || a.current < 0 || a.current >= len(a.detail.VIDs) {
+		return 16.0 / 9
+	}
+	vid := a.detail.VIDs[a.current]
+	if r, ok := a.aspects[vid]; ok {
+		return r
+	}
+	if w, h := a.lib.size(vid); w > 0 && h > 0 {
+		return float32(w) / float32(h)
+	}
+	// Episodes of a series share a shape: use another's.
+	for _, v := range a.detail.VIDs {
+		if r, ok := a.aspects[v]; ok {
+			return r
+		}
+	}
+	return 16.0 / 9
+}
+
+// onReady, when set, runs once the window and the player exist.
+var onReady func(*app)
+
 func main() {
 	a := newApp()
-	srv, err := startMediaServer(a.lib, a.step)
+	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, fullscreen: a.fullscreen})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -343,9 +415,21 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		a.player.Page().LoadHTML(blankHTML, "")
+		_ = a.player.Page().LoadURL(a.server.playerURL())
+		// Leaving full screen by the window's button or a gesture ends
+		// the player's too.
+		a.win.OnLeaveFullScreen(func() {
+			a.win.Update(func() {
+				if a.theater {
+					a.setTheater(false)
+				}
+			})
+		})
 		for _, cat := range hongguo.Categories {
 			a.ensureFeed(cat.Slug)
+		}
+		if onReady != nil {
+			onReady(a)
 		}
 		a.win.Invalidate()
 	})

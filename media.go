@@ -29,6 +29,8 @@ type job struct {
 	received atomic.Int64
 	total    atomic.Int64
 	quality  atomic.Value // string
+	width    atomic.Int64
+	height   atomic.Int64
 }
 
 func (j *job) Phase() string {
@@ -94,6 +96,8 @@ func (l *library) ensure(vid string) *job {
 			return
 		}
 		j.quality.Store(info.Quality)
+		j.width.Store(int64(info.Width))
+		j.height.Store(int64(info.Height))
 		j.phase.Store("downloading")
 		err = hongguo.Download(ctx, info, l.path(vid), func(received, total int64) {
 			j.received.Store(received)
@@ -139,4 +143,41 @@ func (l *library) prune(keep int) {
 	for _, f := range files[keep:] {
 		_ = os.Remove(f.path)
 	}
+}
+
+// episodeStatus is what the player page shows while an episode is prepared.
+type episodeStatus struct {
+	Phase    string `json:"phase"` // resolving, downloading, decrypting, ready, error
+	Received int64  `json:"received"`
+	Total    int64  `json:"total"`
+	Quality  string `json:"quality"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (l *library) status(vid string) episodeStatus {
+	l.mu.Lock()
+	j := l.jobs[vid]
+	l.mu.Unlock()
+	if j == nil {
+		if l.cached(vid) {
+			return episodeStatus{Phase: "ready"}
+		}
+		return episodeStatus{Phase: "resolving"}
+	}
+	st := episodeStatus{Phase: j.Phase(), Received: j.received.Load(), Total: j.total.Load(), Quality: j.Quality()}
+	if j.Finished() && j.err != nil {
+		st.Phase, st.Error = "error", j.err.Error()
+	}
+	return st
+}
+
+// size returns the picture's size, when known before it plays.
+func (l *library) size(vid string) (int, int) {
+	l.mu.Lock()
+	j := l.jobs[vid]
+	l.mu.Unlock()
+	if j == nil {
+		return 0, 0
+	}
+	return int(j.width.Load()), int(j.height.Load())
 }

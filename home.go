@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo/ui"
 
@@ -84,22 +85,34 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 	w, _ := c.Size()
 	h := a.heroHeight(c)
 	cv := a.coverOf(s.Cover)
-	ui.Box(c.Key("hero-" + s.ID)).Height(h).Clip().Children(func() {
-		if cv != nil && cv.img != nil {
-			ui.Image(c, cv.img).Absolute().Left(-60).Top(-60).Size(w+120, h+120).Fit(ui.Cover).Blur(36).Opacity(0.75)
-		}
-		// Darken toward the text, and fade into the page below.
-		ui.Box(c).Absolute().Left(0).Top(0).Size(w, h).LinearGradient(ui.LinearGradient{
-			Angle: 90, Stops: []ui.GradientStop{{Color: withAlpha(colorBG, 250), At: 0}, {Color: withAlpha(colorBG, 170), At: 0.45}, {Color: withAlpha(colorBG, 40), At: 1}}})
-		ui.Box(c).Absolute().Left(0).Bottom(0).Size(w, h*0.45).LinearGradient(ui.LinearGradient{
-			Angle: 180, From: withAlpha(colorBG, 0), To: colorBG})
-		ui.Row(c).Absolute().Left(pagePad).Right(pagePad).Top(navHeight + 28).Bottom(96).AlignItems(ui.Center).Gap(40).Children(func() {
+	titleSize := float32(42)
+	if n := utf8.RuneCountInString(s.Title); n > 24 {
+		titleSize = 30
+	} else if n > 14 {
+		titleSize = 36
+	}
+	// The backdrop is a box of its own and the content follows it in the
+	// flow, pulled up over it: a long title or synopsis then makes the
+	// banner taller and pushes what is below it down, rather than run into
+	// it, and Absolute's backdrop cannot paint over the content.
+	ui.Column(c.Key("hero-" + s.ID)).Children(func() {
+		ui.Box(c).Height(h).Clip().Children(func() {
+			if cv != nil && cv.img != nil {
+				ui.Image(c, cv.img).Absolute().Left(-60).Top(-60).Size(w+120, h+120).Fit(ui.Cover).Blur(36).Opacity(0.75)
+			}
+			// Darken toward the text, and fade into the page below.
+			ui.Box(c).Absolute().Left(0).Top(0).Size(w, h).LinearGradient(ui.LinearGradient{
+				Angle: 90, Stops: []ui.GradientStop{{Color: withAlpha(colorBG, 250), At: 0}, {Color: withAlpha(colorBG, 170), At: 0.45}, {Color: withAlpha(colorBG, 40), At: 1}}})
+			ui.Box(c).Absolute().Left(0).Bottom(0).Size(w, h*0.45).LinearGradient(ui.LinearGradient{
+				Angle: 180, From: withAlpha(colorBG, 0), To: colorBG})
+		})
+		ui.Row(c).Margin(-h, 0, 0, 0).MinHeight(h).Padding(navHeight+28, pagePad, 96, pagePad).AlignItems(ui.Center).Gap(40).Children(func() {
 			ui.Column(c).Grow(1).MinWidth(0).MaxWidth(620).Gap(14).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "红果").FontSize(13).FontWeight(900).TextColor(colorRed)
 					ui.Text(c, "独家短剧").FontSize(12).FontWeight(600).TextColor(colorMuted).LetterSpacing(3)
 				})
-				ui.Text(c, s.Title).FontSize(42).FontWeight(800).MaxLines(2).LineHeight(1.15)
+				ui.Text(c, s.Title).FontSize(titleSize).FontWeight(800).MaxLines(3).LineHeight(1.15)
 				metaRow(c, s, 13)
 				if s.Intro != "" {
 					ui.Text(c, s.Intro).FontSize(15).TextColor(rgba(230, 230, 230, 255)).MaxLines(3).LineHeight(1.5)
@@ -207,7 +220,7 @@ func (a *app) posterRow(c *ui.Context, key, title string, f *feed, more func()) 
 		box := ui.Box(c.Key("strip"))
 		over := box.Hovered()
 		box.Children(func() {
-			ui.ScrollHorizontal(c).TrackScroll(st).Scrollbars(false).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
+			ui.ScrollHorizontal(c).TrackScroll(st).Scrollbars(false).HandleInput(a.rowScroll(st)).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
 				Children(func() {
 					for _, s := range f.items {
 						a.posterCard(c, s, cardW, "")
@@ -308,7 +321,7 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 func (a *app) continueRow(c *ui.Context) {
 	ui.Column(c.Key("row-continue")).Gap(6).Children(func() {
 		ui.Text(c, "继续观看").FontSize(20).FontWeight(700).Padding(0, pagePad)
-		ui.ScrollHorizontal(c).TrackScroll(a.scroll("row-continue")).Scrollbars(false).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
+		ui.ScrollHorizontal(c).TrackScroll(a.scroll("row-continue")).Scrollbars(false).HandleInput(a.rowScroll(a.scroll("row-continue"))).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
 			Children(func() {
 				for _, w := range a.history {
 					note := fmt.Sprintf("看到第 %d 集", w.Episode+1)
@@ -410,4 +423,45 @@ func firstN(s []string, n int) []string {
 		return s[:n]
 	}
 	return s
+}
+
+// rowScroll scrolls a row of posters, row its offset, without taking the
+// page's scrolling. A touchpad moving mostly up or down also moves a
+// little sideways, and the row, the innermost container that the sideways
+// part moves, would take the whole gesture: gestures that go mostly up or
+// down scroll the page, and those that go mostly sideways the row.
+func (a *app) rowScroll(row *ui.ScrollState) func(ui.InputEvent) bool {
+	return func(ev ui.InputEvent) bool {
+		if ev.Kind != ui.InputScroll {
+			return false
+		}
+		if !ev.Precise {
+			// A wheel's notch: down and up are the page's; Shift, or a
+			// wheel that tilts, turns it sideways along the row.
+			dx := ev.DX
+			if ev.Mods&ui.Shift != 0 && dx == 0 {
+				dx = ev.DY
+			}
+			if dx == 0 {
+				return false
+			}
+			row.ScrollTo(row.X+dx, 0, ui.Animation{Duration: 160 * time.Millisecond, Ease: ui.EaseOut})
+			return true
+		}
+		if abs32(ev.DY) > abs32(ev.DX) {
+			page := a.scroll(a.page)
+			page.Y = max(0, min(page.Y+ev.DY, page.MaxY))
+		} else {
+			row.X = max(0, min(row.X+ev.DX, row.MaxX))
+		}
+		a.win.Invalidate()
+		return true
+	}
+}
+
+func abs32(f float32) float32 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }

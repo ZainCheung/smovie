@@ -52,6 +52,12 @@ func (a *app) view(c *ui.Context) {
 	}
 	c.SetTheme(a.theme)
 	c.Root().Background(colorBG)
+	if a.theater && a.page == "watch" {
+		c.Root().Background(rgba(0, 0, 0, 255))
+		ui.WebView(c, a.player).Fill()
+		c.OnShortcut(0, ui.KeyEscape, func() { a.setTheater(false) })
+		return
+	}
 	st := a.scroll(a.page)
 	ui.Box(c).Fill().Children(func() {
 		ui.Scroll(c.Key(a.page)).Fill().TrackScroll(st).Children(func() {
@@ -86,7 +92,7 @@ func (a *app) navBar(c *ui.Context, scrolled float32) {
 			back.Background(withAlpha(colorWhite, uint8(map[bool]int{true: 46, false: 22}[back.Hovered()])))
 			back.Children(func() { ui.Icon(c, iconBack).Size(18, 18).TextColor(colorWhite) })
 			if back.Clicked() {
-				a.page = a.backTo
+				a.go_(a.backTo)
 			}
 		}
 		logo := ui.Row(c.Key("logo")).AlignItems(ui.Center).Gap(2).Cursor(ui.CursorPointer)

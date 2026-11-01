@@ -206,6 +206,8 @@ type PlayInfo struct {
 	Codec      string
 	Quality    string
 	UserAgent  string
+	// Width and Height of the picture, when the API tells them.
+	Width, Height int
 }
 
 // ResolvePlay asks the app API for an episode's media.
@@ -307,6 +309,7 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 		codec  string
 		rank   int
 		pixels int
+		w, h   int
 	}
 	var cands []cand
 	for _, it := range rows {
@@ -326,7 +329,7 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 		if px == 0 {
 			px, _ = strconv.Atoi(regexp.MustCompile(`\d+`).FindString(firstNonEmpty(it.QualityDesc, it.Definition, it.VideoMeta.Definition)))
 		}
-		cands = append(cands, cand{it, codec, rank, px})
+		cands = append(cands, cand{it, codec, rank, px, w, h})
 	}
 	if len(cands) == 0 {
 		return nil, errors.New("本集暂未提供兼容的 H.264/HEVC 片源")
@@ -378,7 +381,7 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 			if c.pixels > 0 {
 				quality = strconv.Itoa(c.pixels) + "P"
 			}
-			return &PlayInfo{VID: vid, URL: media, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua}, nil
+			return &PlayInfo{VID: vid, URL: media, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h}, nil
 		}
 	}
 	if lastErr == nil {
