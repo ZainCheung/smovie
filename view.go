@@ -52,12 +52,6 @@ func (a *app) view(c *ui.Context) {
 	}
 	c.SetTheme(a.theme)
 	c.Root().Background(colorBG)
-	if a.theater && a.page == "watch" {
-		c.Root().Background(rgba(0, 0, 0, 255))
-		ui.WebView(c, a.player).Fill()
-		c.OnShortcut(0, ui.KeyEscape, func() { a.setTheater(false) })
-		return
-	}
 	st := a.scroll(a.page)
 	ui.Box(c).Fill().Children(func() {
 		ui.Scroll(c.Key(a.page)).Fill().TrackScroll(st).Children(func() {

@@ -6,8 +6,10 @@ package main
 // MYGO_AUTOMATION=<socket> (see mygo's automation plugin), and SIGUSR1
 // saves the player page's screenshot to $SMOVIE_PAGE_SHOT, which the
 // window's own capture leaves blank where the web view shows; SIGUSR2
-// pauses the player, which then shows its controls.
+// runs $SMOVIE_EVAL, or the script in $SMOVIE_EVAL_FILE, in the player page, or pauses it, which then shows its
+// controls.
 import (
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,7 +24,17 @@ func init() {
 		go func() {
 			for sig := range ch {
 				if sig == syscall.SIGUSR2 {
-					_, _ = a.player.Page().Eval("smovie.pause()")
+					script := os.Getenv("SMOVIE_EVAL")
+					if f := os.Getenv("SMOVIE_EVAL_FILE"); f != "" {
+						if b, err := os.ReadFile(f); err == nil {
+							script = string(b)
+						}
+					}
+					if script == "" {
+						script = "smovie.pause()"
+					}
+					out, err := a.player.Page().Eval(script)
+					_ = os.WriteFile(os.Getenv("SMOVIE_PAGE_SHOT")+".txt", []byte(fmt.Sprintf("%v %v", out, err)), 0o644)
 					continue
 				}
 				if png, err := a.player.CapturePage(); err == nil {

@@ -72,7 +72,6 @@ type app struct {
 	job       *job
 	playSeq   int
 	aspects   map[string]float32 // width over height, by episode
-	theater   bool               // the player fills the window, in full screen
 	autoNext  bool
 	epRange   int // which block of 50 episodes the list shows
 }
@@ -181,9 +180,6 @@ func (a *app) search(q string) {
 func (a *app) go_(page string) {
 	if a.page == "watch" && page != "watch" {
 		a.tellPlayer("smovie.pause", nil) // as streaming apps do on leaving the player
-		if a.theater {
-			a.setTheater(false)
-		}
 	}
 	if page != "watch" {
 		a.backTo = page
@@ -339,23 +335,6 @@ func (a *app) meta(vid string, w, h int) {
 	a.win.Update(func() { a.aspects[vid] = float32(w) / float32(h) })
 }
 
-// fullscreen shows the player alone in a window filling the screen.
-func (a *app) fullscreen(on bool) {
-	a.win.Update(func() { a.setTheater(on) })
-}
-
-func (a *app) setTheater(on bool) {
-	if on && a.page != "watch" {
-		return
-	}
-	a.theater = on
-	if a.win.IsFullScreen() != on {
-		a.win.SetFullScreen(on)
-	}
-	a.tellPlayer("smovie.setFullscreen", on)
-	a.player.Focus()
-}
-
 func (a *app) isCurrent(vid string) bool {
 	return a.detail != nil && a.current >= 0 && a.current < len(a.detail.VIDs) && a.detail.VIDs[a.current] == vid
 }
@@ -387,7 +366,7 @@ var onReady func(*app)
 
 func main() {
 	a := newApp()
-	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, fullscreen: a.fullscreen})
+	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -416,15 +395,6 @@ func main() {
 			log.Fatal(err)
 		}
 		_ = a.player.Page().LoadURL(a.server.playerURL())
-		// Leaving full screen by the window's button or a gesture ends
-		// the player's too.
-		a.win.OnLeaveFullScreen(func() {
-			a.win.Update(func() {
-				if a.theater {
-					a.setTheater(false)
-				}
-			})
-		})
 		for _, cat := range hongguo.Categories {
 			a.ensureFeed(cat.Slug)
 		}
