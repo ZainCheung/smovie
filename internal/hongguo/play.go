@@ -107,7 +107,7 @@ func registerDevice(ctx context.Context) (*device, error) {
 		"clientudid": randomUUID(), "ipv6_list": []any{}, "region": "CN", "tz_name": "Asia/Shanghai",
 		"tz_offset": 28800, "sim_region": "cn", "sim_serial_number": []any{}, "oaid_may_support": false,
 		"req_id": randomUUID(), "device_platform": "android",
-		"custom": map[string]any{"account_region_src": "fallback", "account_region": "cn", "host_bit": 64, "dragon_device_type": "phone"},
+		"custom":                map[string]any{"account_region_src": "fallback", "account_region": "cn", "host_bit": 64, "dragon_device_type": "phone"},
 		"pre_installed_channel": "", "apk_first_install_time": now, "is_system_app": 0, "sdk_flavor": "china", "guest_mode": 0,
 	}
 	payload, _ := json.Marshal(map[string]any{"magic_tag": "ss_app_log", "header": header, "_gen_time": now})

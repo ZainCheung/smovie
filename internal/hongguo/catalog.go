@@ -119,9 +119,16 @@ func get(ctx context.Context, rawURL string, accept string) ([]byte, error) {
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	req.Header.Set("Referer", SiteOrigin+"/")
-	res, err := httpClient.Do(req)
+	client := httpClient
+	if req.URL.Hostname() == siteHost {
+		client = siteClient
+	}
+	res, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "Timeout") {
+			return nil, errors.New("连接超时，请检查网络后重试")
+		}
+		return nil, errors.New("网络连接失败，请稍后重试")
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
