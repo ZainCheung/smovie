@@ -1,0 +1,12 @@
+{
+  "name": "smovie",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "mygo dev",
+    "build": "mygo build"
+  },
+  "devDependencies": {
+    "mygo-cli": "^0.7.4"
+  }
+}
