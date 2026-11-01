@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -107,7 +108,7 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 				Angle: 180, From: withAlpha(colorBG, 0), To: colorBG})
 		})
 		ui.Row(c).Margin(-h, 0, 0, 0).MinHeight(h).Padding(navHeight+28, pagePad, 96, pagePad).AlignItems(ui.Center).Gap(40).Children(func() {
-			ui.Column(c).Grow(1).MinWidth(0).MaxWidth(620).Gap(14).Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).MaxWidth(min(max(620, w*0.42), 760)).Gap(14).Children(func() {
 				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, "红果").FontSize(13).FontWeight(900).TextColor(colorRed)
 					ui.Text(c, "独家短剧").FontSize(12).FontWeight(600).TextColor(colorMuted).LetterSpacing(3)
@@ -133,6 +134,8 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 					extra()
 				}
 			})
+			// The poster keeps to the right edge however wide the window.
+			ui.Spacer(c)
 			if cv != nil && cv.img != nil {
 				ph := h - navHeight - 28 - 96
 				ui.Image(c, cv.img).Height(ph).Width(ph*3/4).Shrink(0).Fit(ui.Cover).Radius(10).
@@ -385,7 +388,9 @@ func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 	avail := w - 2*pagePad
 	gap := float32(14)
 	cols := max(2, int((avail+gap)/(cardW+gap)))
-	cw := (avail - gap*float32(cols-1)) / float32(cols)
+	// Leave a fraction of a DIP: widths that add up to the row's exactly can
+	// round past it, and wrap the last column to the next line.
+	cw := float32(math.Floor(float64((avail-gap*float32(cols-1))/float32(cols)))) - 0.5
 	if f.err != "" && len(f.items) == 0 {
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, f.err).TextColor(colorMuted)
