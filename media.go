@@ -34,6 +34,40 @@ type job struct {
 	quality  atomic.Value // string
 	width    atomic.Int64
 	height   atomic.Int64
+	// stream tells that the episode's file grows in place and plays while
+	// it does, ready the bytes at its start that are final.
+	stream atomic.Bool
+	ready  atomic.Int64
+
+	sigMu sync.Mutex
+	sig   chan struct{}
+}
+
+// changed returns a channel that closes when the job next moves on.
+func (j *job) changed() <-chan struct{} {
+	j.sigMu.Lock()
+	defer j.sigMu.Unlock()
+	if j.sig == nil {
+		j.sig = make(chan struct{})
+	}
+	return j.sig
+}
+
+func (j *job) notify() {
+	j.sigMu.Lock()
+	defer j.sigMu.Unlock()
+	if j.sig != nil {
+		close(j.sig)
+		j.sig = nil
+	}
+}
+
+// Playable reports whether the episode plays: it is ready, or it streams.
+func (j *job) Playable() bool {
+	if j.Finished() {
+		return j.err == nil
+	}
+	return j.stream.Load()
 }
 
 func (j *job) Phase() string {
@@ -55,6 +89,9 @@ func (j *job) Finished() bool {
 	}
 }
 
+// resolvePlay finds where an episode's media is; tests stand in for it.
+var resolvePlay = hongguo.ResolvePlay
+
 func newLibrary() *library {
 	base, err := os.UserCacheDir()
 	if err != nil {
@@ -63,14 +100,39 @@ func newLibrary() *library {
 	l := &library{dir: filepath.Join(base, "smovie", "media"), jobs: map[string]*job{}}
 	l.limit.Store(videoCacheSizes[defaultVideoCache])
 	_ = os.MkdirAll(l.dir, 0o755)
+	// Episodes a quit cut off half way.
+	parts, _ := filepath.Glob(filepath.Join(l.dir, "*.part"))
+	for _, p := range parts {
+		_ = os.Remove(strings.TrimSuffix(p, ".part") + ".mp4")
+		_ = os.Remove(p)
+	}
 	return l
 }
 
 func (l *library) path(vid string) string { return filepath.Join(l.dir, vid+".mp4") }
 
+// partPath marks an episode whose file is still being written: it streams
+// in place, as renaming a file a player has open fails on Windows.
+func (l *library) partPath(vid string) string { return filepath.Join(l.dir, vid+".part") }
+
 func (l *library) cached(vid string) bool {
 	st, err := os.Stat(l.path(vid))
-	return err == nil && st.Size() > 0
+	if err != nil || st.Size() == 0 {
+		return false
+	}
+	_, err = os.Stat(l.partPath(vid))
+	return os.IsNotExist(err)
+}
+
+// streaming returns the job of vid while its file grows in place.
+func (l *library) streaming(vid string) *job {
+	l.mu.Lock()
+	j := l.jobs[vid]
+	l.mu.Unlock()
+	if j == nil || !j.stream.Load() {
+		return nil
+	}
+	return j
 }
 
 // ensure starts preparing vid unless it is on disk or on its way.
@@ -91,10 +153,11 @@ func (l *library) ensure(vid string) *job {
 	}
 	j.phase.Store("resolving")
 	go func() {
+		defer j.notify()
 		defer close(j.done)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		info, err := hongguo.ResolvePlay(ctx, vid)
+		info, err := resolvePlay(ctx, vid)
 		if err != nil {
 			j.err = err
 			j.phase.Store("error")
@@ -104,18 +167,34 @@ func (l *library) ensure(vid string) *job {
 		j.width.Store(int64(info.Width))
 		j.height.Store(int64(info.Height))
 		j.phase.Store("downloading")
-		err = hongguo.Download(ctx, info, l.path(vid), func(received, total int64) {
-			j.received.Store(received)
-			j.total.Store(total)
-			if total > 0 && received >= total && info.ContentKey != "" {
-				j.phase.Store("decrypting")
-			}
-		})
-		if err != nil {
+		part := l.partPath(vid)
+		if err := os.WriteFile(part, nil, 0o644); err != nil {
 			j.err = err
 			j.phase.Store("error")
 			return
 		}
+		err = hongguo.Download(ctx, info, l.path(vid), func(p hongguo.Progress) {
+			j.received.Store(p.Received)
+			j.total.Store(p.Total)
+			j.ready.Store(p.Ready)
+			if p.Stream {
+				j.stream.Store(true)
+			}
+			if p.Decrypting {
+				j.phase.Store("decrypting")
+			}
+			j.notify()
+		})
+		if err != nil {
+			j.err = err
+			j.phase.Store("error")
+			_ = os.Remove(l.path(vid)) // fails while a player has it open on Windows: the .part stays and marks it
+			if _, serr := os.Stat(l.path(vid)); os.IsNotExist(serr) {
+				_ = os.Remove(part)
+			}
+			return
+		}
+		_ = os.Remove(part)
 		j.phase.Store("ready")
 		go l.prune()
 	}()
@@ -199,7 +278,9 @@ type episodeStatus struct {
 	Received int64  `json:"received"`
 	Total    int64  `json:"total"`
 	Quality  string `json:"quality"`
-	Error    string `json:"error,omitempty"`
+	// Stream tells that the episode plays while it downloads.
+	Stream bool   `json:"stream,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func (l *library) status(vid string) episodeStatus {
@@ -212,7 +293,7 @@ func (l *library) status(vid string) episodeStatus {
 		}
 		return episodeStatus{Phase: "resolving"}
 	}
-	st := episodeStatus{Phase: j.Phase(), Received: j.received.Load(), Total: j.total.Load(), Quality: j.Quality()}
+	st := episodeStatus{Phase: j.Phase(), Received: j.received.Load(), Total: j.total.Load(), Quality: j.Quality(), Stream: j.stream.Load()}
 	if j.Finished() && j.err != nil {
 		st.Phase, st.Error = "error", j.err.Error()
 	}

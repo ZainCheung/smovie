@@ -200,7 +200,7 @@ func (a *app) episodeTile(c *ui.Context, i int) {
 		ep.Background(rgba(255, 255, 255, 20))
 	}
 	ep.Children(func() {
-		if cur && a.job != nil && a.job.Finished() && a.job.err == nil {
+		if cur && a.job != nil && a.job.Playable() {
 			ui.Row(c).Gap(4).AlignItems(ui.Center).Children(func() {
 				equalizer(c)
 				ui.Textf(c, "%d", i+1).FontSize(14).FontWeight(700)
