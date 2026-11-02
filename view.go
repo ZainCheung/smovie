@@ -66,11 +66,14 @@ func (a *app) view(c *ui.Context) {
 				a.historyPage(c)
 			case "settings":
 				a.settingsPage(c)
+			case "mylist":
+				a.myListPage(c)
 			default:
 				a.categoryPage(c, a.page)
 			}
 		})
 		a.navBar(c, st.Y)
+		a.detailsDialog(c)
 	})
 	a.syncSettings()
 }
@@ -107,6 +110,7 @@ func (a *app) navBar(c *ui.Context, scrolled float32) {
 			for _, cat := range hongguo.Categories {
 				a.navTab(c, cat.Slug, cat.Label)
 			}
+			a.navTab(c, "mylist", "我的片单")
 		})
 		ui.Spacer(c)
 		hist := ui.ButtonBase(c.Key("nav-history")).Size(32, 32).Radius(16).Center().Label("观看记录").Tooltip("观看记录")

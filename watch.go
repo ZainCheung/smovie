@@ -12,10 +12,30 @@ const epBlock = 50 // episodes per range of the list
 // watchPage shows the player sized to the episode's shape: a landscape
 // video gets the width of the page with the series and its episodes
 // below, a portrait one stands at the left with them beside it.
+// playerKeys are the player's keys the app passes on while its own UI
+// has the keyboard, as the web view has it only once clicked.
+var playerKeys = []struct {
+	mods ui.Modifiers
+	key  ui.Key
+	name string
+}{
+	{0, ui.KeySpace, " "}, {0, ui.KeyLeft, "ArrowLeft"}, {0, ui.KeyRight, "ArrowRight"},
+	{0, ui.KeyUp, "ArrowUp"}, {0, ui.KeyDown, "ArrowDown"}, {0, ui.KeyM, "m"}, {0, ui.KeyF, "f"},
+	{0, ui.KeyBracketLeft, "["}, {0, ui.KeyBracketRight, "]"}, {0, ui.KeyMinus, "-"}, {0, ui.KeyEqual, "="},
+	{ui.Shift, ui.KeyLeft, "Shift+ArrowLeft"}, {ui.Shift, ui.KeyRight, "Shift+ArrowRight"},
+}
+
 func (a *app) watchPage(c *ui.Context) {
 	s := a.series
 	if s == nil {
 		return
+	}
+	if !a.detailsOpen {
+		for _, k := range playerKeys {
+			if c.Shortcut(k.mods, k.key) {
+				a.tellPlayer("smovie.key", k.name)
+			}
+		}
 	}
 	if a.detail != nil {
 		s = &a.detail.Series
@@ -79,7 +99,10 @@ func (a *app) watchInfo(c *ui.Context, wide bool) {
 	}
 	ui.Row(c).Gap(40).AlignItems(ui.Start).Children(func() {
 		ui.Column(c).Grow(1).MinWidth(0).Gap(14).Children(func() {
-			ui.Text(c, s.Title).FontSize(titleSize).FontWeight(800).LineHeight(1.2).Selectable()
+			ui.Row(c).Gap(14).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, s.Title).FontSize(titleSize).FontWeight(800).LineHeight(1.2).Selectable().Shrink(1).MinWidth(0)
+				a.myListButton(c, "watch-list", s, 36)
+			})
 			metaRow(c, s, 13)
 			if s.Intro != "" {
 				ui.Text(c, s.Intro).FontSize(14).TextColor(rgba(215, 215, 215, 255)).LineHeight(1.6).MaxWidth(820).Selectable()
@@ -104,6 +127,8 @@ func (a *app) watchInfo(c *ui.Context, wide bool) {
 		ui.Text(c, "自动连播").FontSize(13).TextColor(colorMuted)
 		ui.Switch(c.Key("auto"), &a.autoNext).Label("自动连播")
 	})
+	ui.Text(c, "快捷键：空格 播放/暂停 · ←/→ 快退/快进 5 秒 · ↑/↓ 音量 · M 静音 · [ / ] 倍速 · F 全屏 · Shift+←/→ 上/下一集").
+		FontSize(12).TextColor(colorFaint)
 	ui.Box(c).Height(1).Background(rgba(255, 255, 255, 30)).Margin(10, 0, 4, 0)
 	ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {
 		ui.Text(c, "选集").FontSize(20).FontWeight(700)

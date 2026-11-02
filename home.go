@@ -32,6 +32,9 @@ func (a *app) homePage(c *ui.Context) {
 	c.After(time.Minute) // to look again
 	featured := a.feed(hongguo.Categories[0].Slug)
 	if n := min(len(featured.items), heroCount); n > 0 {
+		if a.detailsOpen {
+			a.heroAt = time.Now() // holds still behind the dialog
+		}
 		if time.Since(a.heroAt) >= heroCycle {
 			a.hero = (a.hero + 1) % n
 			a.heroAt = time.Now()
@@ -45,6 +48,7 @@ func (a *app) homePage(c *ui.Context) {
 	}
 	ui.Column(c).Gap(30).Padding(0, 0, 56, 0).Margin(-70, 0, 0, 0).Children(func() {
 		a.continueRow(c)
+		a.myListRow(c)
 		titles := map[string]string{"real-drama": "热播真人剧", "comic-drama": "人气漫剧", "ai-drama": "AI 剧场"}
 		for _, cat := range hongguo.Categories {
 			f := a.feed(cat.Slug)
@@ -131,8 +135,9 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 						a.open(s)
 					}
 					if bigButton(c, "info-"+s.ID, iconInfo, "详情", false).Clicked() {
-						a.open(s)
+						a.showDetails(s)
 					}
+					a.myListButton(c, "list-"+s.ID, s, 44)
 				})
 				if extra != nil {
 					extra()
@@ -292,6 +297,7 @@ func (a *app) moreCard(c *ui.Context, key string, f *feed) {
 type cardExtra struct {
 	progress float32 // of the series watched, a bar along the poster's foot
 	remove   func()  // a button taking it out of the row, under the pointer
+	open     func()  // what a click does instead of playing it
 }
 
 // posterCard is a poster that grows under the pointer, with its title
@@ -302,7 +308,11 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 	k := card.AnimateTo("hover", b2f(hover), ui.Animation{Duration: 180 * time.Millisecond, Ease: ui.EaseOut})
 	card.Scale(1+0.05*k, 1+0.05*k).Translate(0, -4*k)
 	if card.Clicked() {
-		a.open(s)
+		if extra != nil && extra.open != nil {
+			extra.open()
+		} else {
+			a.open(s)
+		}
 	}
 	card.Children(func() {
 		ui.Box(c).Width(width).Height(width*4/3).Radius(6).Clip().Background(colorCard).
@@ -387,6 +397,29 @@ func (a *app) continueRow(c *ui.Context) {
 	})
 }
 
+// myListRow is My List on the home page, newest first.
+func (a *app) myListRow(c *ui.Context) {
+	if len(a.myList) == 0 {
+		return
+	}
+	ui.Column(c.Key("row-mylist")).Gap(6).Children(func() {
+		ui.Row(c).Padding(0, pagePad).AlignItems(ui.End).Gap(10).Children(func() {
+			ui.Text(c, "我的片单").FontSize(20).FontWeight(700)
+			if linkButton(c, "mylist", "查看全部").Clicked() {
+				a.go_("mylist")
+				a.scroll("mylist").Y = 0
+			}
+		})
+		st := a.scroll("row-mylist")
+		ui.ScrollHorizontal(c).TrackScroll(st).Scrollbars(false).HandleInput(a.rowScroll(st)).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
+			Children(func() {
+				for _, s := range firstN(a.myListSeries(), 30) {
+					a.posterCard(c, s, cardW, "", nil)
+				}
+			})
+	})
+}
+
 // watchNote is where a series was left, as "看到第 3 集 · 共 80 集".
 func watchNote(w watched) string {
 	if w.Finished {
@@ -454,9 +487,8 @@ func (a *app) searchPage(c *ui.Context) {
 	})
 }
 
-// posterGrid lays the feed's posters out in as many columns as fit the
-// window, with a button loading the next page.
-func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
+// seriesGrid lays posters out in as many columns as fit the window.
+func (a *app) seriesGrid(c *ui.Context, items []hongguo.Series) {
 	w, _ := c.Size()
 	avail := w - 2*pagePad
 	gap := float32(14)
@@ -464,6 +496,16 @@ func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 	// Leave a fraction of a DIP: widths that add up to the row's exactly can
 	// round past it, and wrap the last column to the next line.
 	cw := float32(math.Floor(float64((avail-gap*float32(cols-1))/float32(cols)))) - 0.5
+	ui.Row(c).Wrap().GapX(gap).GapY(22).Padding(8, 0).Children(func() {
+		for _, s := range items {
+			a.posterCard(c, s, cw, "", nil)
+		}
+	})
+}
+
+// posterGrid lays the feed's posters out in as many columns as fit the
+// window, with a button loading the next page.
+func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 	if f.err != "" && len(f.items) == 0 {
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, f.err).TextColor(colorMuted)
@@ -473,11 +515,7 @@ func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 		})
 		return
 	}
-	ui.Row(c).Wrap().GapX(gap).GapY(22).Padding(8, 0).Children(func() {
-		for _, s := range f.items {
-			a.posterCard(c, s, cw, "", nil)
-		}
-	})
+	a.seriesGrid(c, f.items)
 	ui.Row(c).Justify(ui.Center).Padding(12, 0).Children(func() {
 		switch {
 		case f.loading:

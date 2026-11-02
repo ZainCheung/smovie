@@ -56,6 +56,17 @@ type app struct {
 	history      []watched
 	confirmClear bool // asking whether to empty the history
 
+	myList       []listed
+	episodeCache map[string]*hongguo.Detail // by series ID
+
+	// The details dialog.
+	detailsOpen  bool
+	detailsOf    hongguo.Series
+	details      *hongguo.Detail
+	detailsErr   string
+	detailsSeq   int
+	detailsRange int
+
 	saved      settings // as last saved
 	videoCache int      // index of videoCacheSizes
 	usage      usage
@@ -76,19 +87,21 @@ type app struct {
 func newApp() *app {
 	st := loadSettings()
 	a := &app{
-		page:       "home",
-		backTo:     "home",
-		feeds:      map[string]*feed{},
-		aspects:    map[string]float32{},
-		scrolls:    map[string]*ui.ScrollState{},
-		lib:        newLibrary(),
-		theme:      netflixTheme(),
-		history:    loadHistory(),
-		autoNext:   st.AutoNext,
-		saved:      st,
-		videoCache: st.VideoCache,
-		current:    -1,
-		heroAt:     time.Now(),
+		page:         "home",
+		backTo:       "home",
+		feeds:        map[string]*feed{},
+		aspects:      map[string]float32{},
+		scrolls:      map[string]*ui.ScrollState{},
+		lib:          newLibrary(),
+		theme:        netflixTheme(),
+		history:      loadHistory(),
+		myList:       loadMyList(),
+		episodeCache: map[string]*hongguo.Detail{},
+		autoNext:     st.AutoNext,
+		saved:        st,
+		videoCache:   st.VideoCache,
+		current:      -1,
+		heroAt:       time.Now(),
 	}
 	a.lib.limit.Store(videoCacheSizes[st.VideoCache])
 	go a.lib.prune()
@@ -244,15 +257,26 @@ func (a *app) lastEpisode(id string) (int, bool) {
 // --- playback ---
 
 // open shows a series and plays it from where the user left it.
-func (a *app) open(s hongguo.Series) {
+func (a *app) open(s hongguo.Series) { a.openAt(s, -1) }
+
+// openAt shows a series and plays its episode index ep, or, for -1,
+// where the user left it.
+func (a *app) openAt(s hongguo.Series, ep int) {
+	a.detailsOpen = false
 	if a.page != "watch" {
 		a.backTo = a.page
 	}
 	a.page = "watch"
 	if a.series != nil && a.series.ID == s.ID {
+		if ep >= 0 && a.detail != nil && ep != a.current {
+			a.play(min(ep, len(a.detail.VIDs)-1))
+		}
 		return
 	}
-	start, _ := a.lastEpisode(s.ID)
+	start := ep
+	if start < 0 {
+		start, _ = a.lastEpisode(s.ID)
+	}
 	a.series = &s
 	a.detail, a.detailErr = nil, ""
 	a.current, a.job = -1, nil
@@ -261,26 +285,44 @@ func (a *app) open(s hongguo.Series) {
 	a.scroll("watch").Y = 0
 	a.detailSeq++
 	seq := a.detailSeq
+	a.episodes(s, func(d *hongguo.Detail, err error) {
+		if seq != a.detailSeq {
+			return
+		}
+		if err != nil {
+			a.detailErr = err.Error()
+			return
+		}
+		a.detail = d
+		a.play(min(start, len(d.VIDs)-1))
+	})
+}
+
+// episodes loads the episodes of a series, once, and gives them to done
+// on the main thread.
+func (a *app) episodes(s hongguo.Series, done func(*hongguo.Detail, error)) {
+	if d, ok := a.episodeCache[s.ID]; ok {
+		done(d, nil)
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		d, err := hongguo.Episodes(ctx, s.ID)
 		a.win.Update(func() {
-			if seq != a.detailSeq {
-				return
+			if err == nil {
+				if d.Intro == "" {
+					d.Intro = s.Intro
+				}
+				if len(d.Tags) == 0 {
+					d.Tags = s.Tags
+				}
+				if d.Cover == "" {
+					d.Cover = s.Cover
+				}
+				a.episodeCache[s.ID] = d
 			}
-			if err != nil {
-				a.detailErr = err.Error()
-				return
-			}
-			if d.Intro == "" {
-				d.Intro = s.Intro
-			}
-			if len(d.Tags) == 0 {
-				d.Tags = s.Tags
-			}
-			a.detail = d
-			a.play(min(start, len(d.VIDs)-1))
+			done(d, err)
 		})
 	}()
 }

@@ -335,15 +335,45 @@ function wake() {
 document.addEventListener('mouseleave', () => { if (!v.paused) document.body.classList.remove('active'); });
 v.addEventListener('pause', () => { if (!v.ended) report(false); clearTimeout(idleTimer); document.body.classList.add('active'); });
 
-document.addEventListener('keydown', e => {
-  const k = e.key; let handled = true;
-  if (e.shiftKey && k === 'ArrowRight') step('next');
-  else if (e.shiftKey && k === 'ArrowLeft') step('prev');
-  else if (k === ' ' && e.target !== v) v.paused ? v.play() : v.pause();
+// --- keys, from the page, or from the app while its own UI has the focus ---
+const SPEEDS = [0.75, 1, 1.25, 1.5, 2, 3];
+function seek(d) {
+  if (!v.duration) return;
+  v.currentTime = Math.max(0, Math.min(v.duration - 0.1, v.currentTime + d));
+  toast((d < 0 ? '快退 ' : '快进 ') + Math.abs(d) + ' 秒');
+}
+function volume(d) {
+  v.muted = false; v.volume = Math.max(0, Math.min(1, Math.round((v.volume + d) * 10) / 10));
+  toast('音量 ' + Math.round(v.volume * 100) + '%');
+}
+function speed(d) {
+  let i = SPEEDS.findIndex(x => x >= v.playbackRate - 0.01); if (i < 0) i = 1;
+  i = Math.max(0, Math.min(SPEEDS.length - 1, i + d));
+  v.playbackRate = SPEEDS[i]; store.set('speed', v.playbackRate);
+  toast(v.playbackRate + 'x 倍速');
+}
+function key(k, shift) {
+  if (shift && k === 'ArrowRight') step('next');
+  else if (shift && k === 'ArrowLeft') step('prev');
+  else if (k === ' ') { if (v.paused) { v.play(); toast('播放'); } else { v.pause(); toast('暂停'); } }
+  else if (k === 'ArrowLeft') seek(-5);
+  else if (k === 'ArrowRight') seek(5);
+  else if (k === 'ArrowUp') volume(0.1);
+  else if (k === 'ArrowDown') volume(-0.1);
+  else if (k === 'm' || k === 'M') { v.muted = !v.muted; toast(v.muted ? '已静音' : '取消静音'); }
+  else if (k === '[' || k === '-') speed(-1);
+  else if (k === ']' || k === '=') speed(1);
+  else if (k === '\\') { v.playbackRate = 1; store.set('speed', 1); toast('1x 倍速'); }
   else if (k === 'f' || k === 'F') toggleFS();
-  else handled = false;
-  if (handled) { e.preventDefault(); wake(); }
-});
+  else return false;
+  wake(); return true;
+}
+// In the capture phase, so that the <video>'s own keys don't act twice.
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (key(e.key, e.shiftKey)) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+window.smovie.key = k => k.startsWith('Shift+') ? key(k.slice(6), true) : key(k, false);
 
 v.volume = store.get('volume', 1); v.muted = MUTED || store.get('muted', false);
 refreshNav();
