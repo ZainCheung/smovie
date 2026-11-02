@@ -52,7 +52,8 @@ type app struct {
 
 	images *imageCache
 
-	history []watched
+	history      []watched
+	confirmClear bool // asking whether to empty the history
 
 	// What plays.
 	series    *hongguo.Series
@@ -175,13 +176,24 @@ func (a *app) go_(page string) {
 	a.page = page
 }
 
-func (a *app) lastEpisode(id string) (int, bool) {
+// watchOf returns the history of the series, if it was played.
+func (a *app) watchOf(id string) (watched, bool) {
 	for _, w := range a.history {
 		if w.Series.ID == id {
-			return w.Episode, true
+			return w, true
 		}
 	}
-	return 0, false
+	return watched{}, false
+}
+
+// lastEpisode is the episode index a series picks up at: where it was
+// left, or the first again once it was watched to its end.
+func (a *app) lastEpisode(id string) (int, bool) {
+	w, ok := a.watchOf(id)
+	if !ok || w.Finished {
+		return 0, ok
+	}
+	return w.Episode, true
 }
 
 // --- playback ---
@@ -236,11 +248,15 @@ func (a *app) play(index int) {
 	a.epRange = index / epBlock
 	vid := a.detail.VIDs[index]
 	total := len(a.detail.VIDs)
+	var start float64
+	if w, ok := a.watchOf(a.detail.ID); ok && !w.Finished {
+		start = w.resumeAt(index)
+	}
 	a.history = recordWatch(a.history, a.detail.Series, index, total)
 	saveHistory(append([]watched(nil), a.history...))
 	j := a.lib.ensure(vid)
 	a.job = j
-	info := episodeInfo{VID: vid, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover}
+	info := episodeInfo{VID: vid, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
 	a.playSeq++
@@ -286,6 +302,34 @@ func (a *app) retry(vid string) {
 	})
 }
 
+func (a *app) progress(vid string, pos, dur float64, ended bool) {
+	a.win.Update(func() {
+		if a.isCurrent(vid) && recordProgress(a.history, a.detail.ID, a.current, pos, dur, ended) {
+			saveHistory(append([]watched(nil), a.history...))
+		}
+	})
+}
+
+// forget takes a series out of the history, offering to put it back.
+func (a *app) forget(c *ui.Context, id string) {
+	list, w, at := removeWatch(a.history, id)
+	if at < 0 {
+		return
+	}
+	a.history = list
+	saveHistory(append([]watched(nil), a.history...))
+	c.ToastAction("已从观看记录中移除《"+w.Series.Title+"》", "撤销", func() {
+		a.history = restoreWatch(a.history, w, at)
+		saveHistory(append([]watched(nil), a.history...))
+	})
+}
+
+// forgetAll empties the history.
+func (a *app) forgetAll() {
+	a.history = nil
+	saveHistory(nil)
+}
+
 func (a *app) meta(vid string, w, h int) {
 	a.win.Update(func() { a.aspects[vid] = float32(w) / float32(h) })
 }
@@ -321,7 +365,7 @@ var onReady func(*app)
 
 func main() {
 	a := newApp()
-	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta})
+	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -62,6 +62,8 @@ func (a *app) view(c *ui.Context) {
 				a.watchPage(c)
 			case "search":
 				a.searchPage(c)
+			case "history":
+				a.historyPage(c)
 			default:
 				a.categoryPage(c, a.page)
 			}
@@ -104,6 +106,16 @@ func (a *app) navBar(c *ui.Context, scrolled float32) {
 			}
 		})
 		ui.Spacer(c)
+		hist := ui.ButtonBase(c.Key("nav-history")).Size(32, 32).Radius(16).Center().Label("观看记录").Tooltip("观看记录")
+		histOn := a.page == "history" || (a.page == "watch" && a.backTo == "history")
+		hist.Background(withAlpha(colorWhite, uint8(30*b2f(hist.Hovered()))))
+		hist.Children(func() {
+			ui.Icon(c, iconClock).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[histOn || hist.Hovered()])
+		})
+		if hist.Clicked() {
+			a.go_("history")
+			a.scroll("history").Y = 0
+		}
 		ui.SearchField(c.Key("search"), &a.query).Placeholder("片名、题材、演员").Label("搜索").Width(240).
 			OnSubmit(func() { a.search(a.query) })
 	})

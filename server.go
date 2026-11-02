@@ -15,11 +15,12 @@ var vidPattern = regexp.MustCompile(`^\d{1,30}$`)
 
 // episodeInfo is the episode the player page shows.
 type episodeInfo struct {
-	VID    string `json:"vid"`
-	Ep     int    `json:"ep"`
-	Total  int    `json:"total"`
-	Title  string `json:"title"`
-	Poster string `json:"poster"`
+	VID    string  `json:"vid"`
+	Ep     int     `json:"ep"`
+	Total  int     `json:"total"`
+	Title  string  `json:"title"`
+	Poster string  `json:"poster"`
+	Start  float64 `json:"start,omitempty"` // seconds to pick up at
 }
 
 // playerEvents is what the player page tells the app.
@@ -27,6 +28,8 @@ type playerEvents struct {
 	step  func(vid string, delta int, ended bool)
 	retry func(vid string)
 	meta  func(vid string, width, height int)
+	// progress tells where vid is, of its duration, and that it ended.
+	progress func(vid string, pos, dur float64, ended bool)
 }
 
 // mediaServer serves the player page and the decrypted episodes to the
@@ -101,6 +104,15 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		height, _ := strconv.Atoi(q.Get("h"))
 		if vid := q.Get("v"); vidPattern.MatchString(vid) && width > 0 && height > 0 {
 			s.events.meta(vid, width, height)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /progress", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		pos, err1 := strconv.ParseFloat(q.Get("t"), 64)
+		dur, err2 := strconv.ParseFloat(q.Get("d"), 64)
+		if vid := q.Get("v"); vidPattern.MatchString(vid) && err1 == nil && err2 == nil && pos >= 0 && dur > 0 {
+			s.events.progress(vid, min(pos, dur), dur, q.Get("ended") != "")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -192,6 +204,14 @@ body.active .side{opacity:1;pointer-events:auto}
 const $ = id => document.getElementById(id);
 const v = $('v'), MUTED = {{MUTED}};
 let cur = null, token = 0, sent = false;
+let lastReport = 0;
+// report tells the app where the episode is, for the history.
+function report(ended) {
+  if (!cur || !v.getAttribute('src') || !isFinite(v.duration) || !v.duration) return;
+  lastReport = Date.now();
+  post('/progress?v=' + cur.vid + '&t=' + v.currentTime.toFixed(1) + '&d=' + v.duration.toFixed(1) + (ended ? '&ended=1' : ''));
+}
+const clock = s => { s = Math.floor(s); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 const post = path => fetch(path, {method: 'POST'}).catch(() => {});
 const show = (id, on) => { $(id).hidden = !on; };
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 1400); }
@@ -286,9 +306,12 @@ v.addEventListener('volumechange', () => { if (!MUTED) { store.set('volume', v.v
 v.addEventListener('ratechange', () => { if (v.readyState) store.set('speed', v.playbackRate); });
 v.addEventListener('loadedmetadata', () => {
   v.playbackRate = store.get('speed', 1);
+  if (cur && cur.start > 3 && cur.start < v.duration - 5) { v.currentTime = cur.start; toast('从 ' + clock(cur.start) + ' 继续播放'); }
   if (cur && v.videoWidth) post('/meta?v=' + cur.vid + '&w=' + v.videoWidth + '&h=' + v.videoHeight);
 });
+v.addEventListener('timeupdate', () => { if (!v.paused && Date.now() - lastReport > 5000) report(false); });
 v.addEventListener('ended', () => {
+  report(true);
   $('endtitle').textContent = hasNext() ? '第 ' + cur.ep + ' 集已播完' : '全剧终';
   show('ended', true);
   if (hasNext()) post('/step?v=' + cur.vid + '&to=ended');
@@ -310,7 +333,7 @@ function wake() {
 }
 ['mousemove', 'mousedown'].forEach(e => document.addEventListener(e, wake));
 document.addEventListener('mouseleave', () => { if (!v.paused) document.body.classList.remove('active'); });
-v.addEventListener('pause', () => { clearTimeout(idleTimer); document.body.classList.add('active'); });
+v.addEventListener('pause', () => { if (!v.ended) report(false); clearTimeout(idleTimer); document.body.classList.add('active'); });
 
 document.addEventListener('keydown', e => {
   const k = e.key; let handled = true;

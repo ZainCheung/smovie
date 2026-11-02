@@ -20,5 +20,8 @@ var (
 	iconChevronLeft  = icon(`<path d="m15 18-6-6 6-6"/>`)
 	iconChevronRight = icon(`<path d="m9 18 6-6-6-6"/>`)
 	iconChevronDown  = icon(`<path d="m6 9 6 6 6-6"/>`)
+	iconClose        = icon(`<path d="M18 6 6 18M6 6l12 12"/>`)
+	iconClock        = icon(`<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>`)
+	iconTrash        = icon(`<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>`)
 	iconRefresh      = icon(`<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>`)
 )

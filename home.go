@@ -42,9 +42,7 @@ func (a *app) homePage(c *ui.Context) {
 		a.heroPlaceholder(c, featured)
 	}
 	ui.Column(c).Gap(30).Padding(0, 0, 56, 0).Margin(-70, 0, 0, 0).Children(func() {
-		if len(a.history) > 0 {
-			a.continueRow(c)
-		}
+		a.continueRow(c)
 		titles := map[string]string{"real-drama": "热播真人剧", "comic-drama": "人气漫剧", "ai-drama": "AI 剧场"}
 		for _, cat := range hongguo.Categories {
 			f := a.feed(cat.Slug)
@@ -121,8 +119,11 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 				}
 				ui.Row(c).Gap(12).Margin(8, 0, 0, 0).Children(func() {
 					label := "播放"
-					if ep, ok := a.lastEpisode(s.ID); ok {
-						label = fmt.Sprintf("继续第 %d 集", ep+1)
+					if w, ok := a.watchOf(s.ID); ok {
+						label = fmt.Sprintf("继续第 %d 集", w.Episode+1)
+						if w.Finished {
+							label = "重新播放"
+						}
 					}
 					if bigButton(c, "play-"+s.ID, iconPlayFill, label, true).Clicked() {
 						a.open(s)
@@ -190,16 +191,8 @@ func (a *app) posterRow(c *ui.Context, key, title string, f *feed, more func()) 
 		head := ui.Row(c).Padding(0, pagePad).AlignItems(ui.End).Gap(10)
 		head.Children(func() {
 			ui.Text(c, title).FontSize(20).FontWeight(700)
-			if more != nil {
-				link := ui.ButtonBase(c.Key("more")).Row().AlignItems(ui.Center).Gap(2).Label("查看全部")
-				col := map[bool]ui.Color{true: colorWhite, false: rgba(84, 185, 197, 255)}[link.Hovered()]
-				link.Children(func() {
-					ui.Text(c, "查看全部").FontSize(13).FontWeight(600).TextColor(col)
-					ui.Icon(c, iconChevronRight).Size(13, 13).TextColor(col)
-				})
-				if link.Clicked() {
-					more()
-				}
+			if more != nil && linkButton(c, "more", "查看全部").Clicked() {
+				more()
 			}
 		})
 		switch {
@@ -226,7 +219,7 @@ func (a *app) posterRow(c *ui.Context, key, title string, f *feed, more func()) 
 			ui.ScrollHorizontal(c).TrackScroll(st).Scrollbars(false).HandleInput(a.rowScroll(st)).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
 				Children(func() {
 					for _, s := range f.items {
-						a.posterCard(c, s, cardW, "")
+						a.posterCard(c, s, cardW, "", nil)
 					}
 					if f.more() {
 						a.moreCard(c, key, f)
@@ -293,9 +286,15 @@ func (a *app) moreCard(c *ui.Context, key string, f *feed) {
 	}
 }
 
+// cardExtra is what a poster of the history shows besides.
+type cardExtra struct {
+	progress float32 // of the series watched, a bar along the poster's foot
+	remove   func()  // a button taking it out of the row, under the pointer
+}
+
 // posterCard is a poster that grows under the pointer, with its title
 // below. note, when set, replaces the episode count, as "看到第 3 集".
-func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note string) {
+func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note string, extra *cardExtra) {
 	card := ui.Column(c.Key(s.ID)).Width(width).Shrink(0).Gap(8).Cursor(ui.CursorPointer).Label(s.Title)
 	hover := card.Hovered()
 	k := card.AnimateTo("hover", b2f(hover), ui.Animation{Duration: 180 * time.Millisecond, Ease: ui.EaseOut})
@@ -318,6 +317,11 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 				ui.Text(c, s.EpisodeLabel).Absolute().Right(6).Bottom(6).FontSize(10).FontWeight(600).
 					Padding(2, 6).Radius(4).Background(rgba(0, 0, 0, 170)).TextColor(colorWhite)
 			}
+			if extra != nil && extra.progress > 0 {
+				ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(4).Background(rgba(255, 255, 255, 60)).Children(func() {
+					ui.Box(c).Width(width * min(extra.progress, 1)).Height(4).Background(colorRed)
+				})
+			}
 			if hover {
 				ui.Box(c).Absolute().Left(0).Top(0).Right(0).Bottom(0).Radius(6).Border(2, withAlpha(colorWhite, 200))
 				ui.Box(c).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Children(func() {
@@ -326,6 +330,15 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 						ui.Icon(c, iconPlayFill).Size(20, 20).TextColor(colorWhite).Margin(0, 0, 0, 3)
 					})
 				})
+				if extra != nil && extra.remove != nil {
+					x := ui.ButtonBase(c.Key("remove")).Absolute().Top(6).Right(6).Size(26, 26).Radius(13).Center().
+						Label("从继续观看中移除").Tooltip("从继续观看中移除")
+					x.Background(rgba(0, 0, 0, 150+80*b2f(x.Hovered()))).Border(1, withAlpha(colorWhite, 160))
+					x.Children(func() { ui.Icon(c, iconClose).Size(14, 14).TextColor(colorWhite) })
+					if x.Clicked() {
+						extra.remove()
+					}
+				}
 			}
 		})
 		ui.Column(c).Gap(3).Children(func() {
@@ -341,19 +354,58 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 }
 
 func (a *app) continueRow(c *ui.Context) {
+	var list []watched
+	for _, w := range a.history {
+		if !w.Finished {
+			list = append(list, w)
+		}
+	}
+	if len(list) == 0 {
+		return
+	}
+	list = firstN(list, 20)
 	ui.Column(c.Key("row-continue")).Gap(6).Children(func() {
-		ui.Text(c, "继续观看").FontSize(20).FontWeight(700).Padding(0, pagePad)
+		ui.Row(c).Padding(0, pagePad).AlignItems(ui.End).Gap(10).Children(func() {
+			ui.Text(c, "继续观看").FontSize(20).FontWeight(700)
+			if linkButton(c, "history", "管理观看记录").Clicked() {
+				a.go_("history")
+				a.scroll("history").Y = 0
+			}
+		})
 		ui.ScrollHorizontal(c).TrackScroll(a.scroll("row-continue")).Scrollbars(false).HandleInput(a.rowScroll(a.scroll("row-continue"))).Padding(12, pagePad, 34, pagePad).Gap(cardGap).
 			Children(func() {
-				for _, w := range a.history {
-					note := fmt.Sprintf("看到第 %d 集", w.Episode+1)
-					if w.Total > 0 {
-						note += fmt.Sprintf(" · 共 %d 集", w.Total)
-					}
-					a.posterCard(c, w.Series, cardW, note)
+				for _, w := range list {
+					id := w.Series.ID
+					a.posterCard(c, w.Series, cardW, watchNote(w), &cardExtra{
+						progress: w.progress(),
+						remove:   func() { a.forget(c, id) },
+					})
 				}
 			})
 	})
+}
+
+// watchNote is where a series was left, as "看到第 3 集 · 共 80 集".
+func watchNote(w watched) string {
+	if w.Finished {
+		return "已看完"
+	}
+	note := fmt.Sprintf("看到第 %d 集", w.Episode+1)
+	if w.Total > 0 {
+		note += fmt.Sprintf(" · 共 %d 集", w.Total)
+	}
+	return note
+}
+
+// linkButton is a small link in a row's heading.
+func linkButton(c *ui.Context, key, label string) ui.Element {
+	link := ui.ButtonBase(c.Key(key)).Row().AlignItems(ui.Center).Gap(2).Label(label)
+	col := map[bool]ui.Color{true: colorWhite, false: rgba(84, 185, 197, 255)}[link.Hovered()]
+	link.Children(func() {
+		ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(col)
+		ui.Icon(c, iconChevronRight).Size(13, 13).TextColor(col)
+	})
+	return link
 }
 
 // --- category and search ---
@@ -421,7 +473,7 @@ func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 	}
 	ui.Row(c).Wrap().GapX(gap).GapY(22).Padding(8, 0).Children(func() {
 		for _, s := range f.items {
-			a.posterCard(c, s, cw, "")
+			a.posterCard(c, s, cw, "", nil)
 		}
 	})
 	ui.Row(c).Justify(ui.Center).Padding(12, 0).Children(func() {
@@ -442,7 +494,7 @@ func (a *app) posterGrid(c *ui.Context, key string, f *feed) {
 	})
 }
 
-func firstN(s []string, n int) []string {
+func firstN[T any](s []T, n int) []T {
 	if len(s) > n {
 		return s[:n]
 	}
