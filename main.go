@@ -455,6 +455,7 @@ func (a *app) setPlayerFull(on bool) {
 		return
 	}
 	a.playerFull = on
+	a.tellPlayer("smovie.fullScreen", on)
 	if on {
 		a.windowedBefore = !a.win.IsFullScreen()
 		if a.windowedBefore {

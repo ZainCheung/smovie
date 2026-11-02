@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,8 +65,9 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		if os.Getenv("SMOVIE_MUTED") != "" {
 			muted = "true" // for automated runs
 		}
-		hostFS := strconv.FormatBool(hostFullScreen)
-		_, _ = strings.NewReplacer("{{MUTED}}", muted, "{{HOST_FS}}", hostFS).WriteString(w, playerHTML)
+		_, _ = strings.NewReplacer("{{MUTED}}", muted,
+			"{{HOST_FS}}", strconv.FormatBool(hostFullScreen),
+			"{{CUSTOM}}", strconv.FormatBool(customControls())).WriteString(w, playerHTML)
 	})
 	mux.HandleFunc("GET /media/{file}", s.media)
 	mux.HandleFunc("GET /current", func(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +133,13 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 	return s, nil
 }
 
+// customControls is whether the player draws its own controls: everywhere
+// but macOS, whose WebKit controls fit the system, where WebView2's look
+// out of place. SMOVIE_CUSTOM_CONTROLS=1 shows them on macOS too.
+func customControls() bool {
+	return runtime.GOOS != "darwin" || os.Getenv("SMOVIE_CUSTOM_CONTROLS") != ""
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -168,7 +177,7 @@ const playerHTML = `<!doctype html>
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
-  font-family:-apple-system,"PingFang SC",sans-serif;-webkit-user-select:none;user-select:none}
+  font-family:-apple-system,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;-webkit-user-select:none;user-select:none}
 video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;outline:none}
 button{font:inherit;color:inherit;border:0;cursor:pointer}
 .side{position:fixed;top:50%;width:48px;height:72px;margin-top:-56px;border-radius:12px;
@@ -200,6 +209,64 @@ body.active .side{opacity:1;pointer-events:auto}
 #toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 16px;border-radius:10px;background:rgba(0,0,0,.75);
   font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
+/* --- the custom controls (CUSTOM), in the manner of macOS's --- */
+#bar{display:none}
+body.custom #bar{display:grid}
+body.custom .side{display:none}
+body.custom:not(.active){cursor:none}
+#bar{position:fixed;left:14px;right:14px;bottom:12px;grid-template-columns:auto 1fr auto;grid-template-areas:"l s r";
+  align-items:center;column-gap:10px;padding:6px 10px;border-radius:24px;background:rgba(36,36,38,.62);
+  -webkit-backdrop-filter:blur(24px) saturate(1.8);backdrop-filter:blur(24px) saturate(1.8);
+  box-shadow:0 8px 30px rgba(0,0,0,.35),inset 0 0 0 .5px rgba(255,255,255,.12);
+  opacity:0;transition:opacity .25s;pointer-events:none}
+body.active #bar{opacity:1;pointer-events:auto}
+.grp{display:flex;align-items:center;gap:2px}
+#bl{grid-area:l} #br{grid-area:r} #seek{grid-area:s;display:flex;align-items:center;gap:12px;min-width:0}
+.cb{position:relative;width:36px;height:36px;border-radius:18px;background:none;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,.92);transition:background .15s,transform .1s;flex:none}
+.cb:hover{background:rgba(255,255,255,.14);color:#fff}
+.cb:active{transform:scale(.9)}
+.cb[disabled]{opacity:.32;pointer-events:none}
+.cb svg{width:22px;height:22px}
+svg{display:block}
+.cb.big svg{width:26px;height:26px}
+.cb .n{position:absolute;font-size:8.5px;font-weight:700;top:50%;left:50%;transform:translate(-50%,-38%)}
+.time{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.92);flex:none}
+.track{position:relative;flex:1;min-width:40px;height:22px;cursor:pointer;touch-action:none}
+.track .rail,.track .buf,.track .fill{position:absolute;left:0;top:50%;height:6px;margin-top:-3px;border-radius:3px}
+.track .rail{right:0;background:rgba(255,255,255,.22)}
+.track .buf{background:rgba(255,255,255,.3);width:0}
+.track .fill{background:#fff;width:0}
+.track .knob{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 4px rgba(0,0,0,.4);transition:transform .12s;left:0}
+.track:hover .knob,.track.drag .knob{transform:scale(1.15)}
+.track:hover .rail,.track:hover .buf,.track:hover .fill,.track.drag .rail,.track.drag .buf,.track.drag .fill{height:8px;margin-top:-4px;border-radius:4px}
+.tip{position:absolute;bottom:26px;padding:3px 8px;border-radius:6px;background:rgba(0,0,0,.78);font-size:12px;font-weight:600;
+  font-variant-numeric:tabular-nums;transform:translateX(-50%);opacity:0;pointer-events:none;transition:opacity .12s;white-space:nowrap}
+.track:hover .tip,.track.drag .tip{opacity:1}
+#vol{display:flex;align-items:center}
+#vol .track{flex:none;width:0;min-width:0;overflow:hidden;transition:width .2s,margin .2s;margin:0}
+#vol:hover .track,#vol .track.drag{width:72px;margin:0 8px 0 2px;overflow:visible}
+#vol .knob{width:12px;height:12px;margin:-6px 0 0 -6px}
+#spd{width:auto;min-width:44px;padding:0 8px;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+.menu{position:absolute;bottom:46px;right:0;display:none;flex-direction:column;padding:6px;border-radius:14px;min-width:112px;
+  background:rgba(36,36,38,.86);-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);
+  box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.12)}
+.menu.open{display:flex}
+.menu button{background:none;text-align:left;padding:7px 12px 7px 28px;border-radius:8px;font-size:13px;font-weight:600;position:relative}
+.menu button:hover{background:rgba(255,255,255,.14)}
+.menu button.on::before{content:"";position:absolute;left:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#e50914}
+.wrap{position:relative}
+.fs-exit,body.full .fs-enter{display:none} body.full .fs-exit{display:block}
+.pl-pause,body.playing .pl-play{display:none} body.playing .pl-pause{display:block}
+.vo-off,body.muted .vo-on{display:none} body.muted .vo-off{display:block}
+/* A narrow player, as a portrait episode's: the progress bar takes a row of its own. */
+@media (max-width:600px){
+  #bar{grid-template-columns:1fr auto;grid-template-areas:"s s" "l r";row-gap:2px;padding:8px 8px 4px;border-radius:18px;left:8px;right:8px;bottom:8px}
+  #seek{padding:0 6px}
+  .opt{display:none}
+}
+@media (max-width:380px){ #pip{display:none} }
 </style></head>
 <body>
 <video id="v" controls playsinline preload="auto"></video>
@@ -216,10 +283,29 @@ body.active .side{opacity:1;pointer-events:auto}
   <div style="display:flex;gap:12px"><button class="pill" id="replay">重播</button><button class="pill primary" id="endnext">下一集</button></div>
 </div>
 <div id="toast"></div>
+<div id="bar">
+  <div class="grp" id="bl">
+    <button class="cb" id="cprev" title="上一集 (Shift+←)"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM19 5.5v13a1 1 0 0 1-1.5.86l-9.2-6.5a1 1 0 0 1 0-1.72l9.2-6.5A1 1 0 0 1 19 5.5z"/></svg></button>
+    <button class="cb opt" id="back" title="快退 10 秒 (←)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 3v5h5"/></svg><span class="n">10</span></button>
+    <button class="cb big" id="play" title="播放/暂停 (空格)"><svg viewBox="0 0 24 24" fill="currentColor" class="pl-play"><path d="M7 4.8v14.4a1 1 0 0 0 1.5.86l12-7.2a1 1 0 0 0 0-1.72l-12-7.2A1 1 0 0 0 7 4.8z"/></svg><svg viewBox="0 0 24 24" fill="currentColor" class="pl-pause"><rect x="6" y="4.5" width="4" height="15" rx="1.2"/><rect x="14" y="4.5" width="4" height="15" rx="1.2"/></svg></button>
+    <button class="cb opt" id="fwd" title="快进 10 秒 (→)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 3v5h-5"/></svg><span class="n">10</span></button>
+    <button class="cb" id="cnext" title="下一集 (Shift+→)"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM5 5.5v13a1 1 0 0 0 1.5.86l9.2-6.5a1 1 0 0 0 0-1.72l-9.2-6.5A1 1 0 0 0 5 5.5z"/></svg></button>
+  </div>
+  <div id="seek"><span class="time" id="tcur">00:00</span>
+    <div class="track" id="prog"><div class="rail"></div><div class="buf"></div><div class="fill"></div><div class="knob"></div><div class="tip"></div></div>
+    <span class="time" id="tdur">00:00</span></div>
+  <div class="grp" id="br">
+    <div id="vol"><button class="cb" id="mute" title="静音 (M)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-on"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-off"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="m16 9 6 6M22 9l-6 6"/></svg></button>
+      <div class="track" id="volbar"><div class="rail"></div><div class="fill"></div><div class="knob"></div></div></div>
+    <div class="wrap"><button class="cb" id="spd" title="倍速 ([ / ])">1x</button><div class="menu" id="spdmenu"></div></div>
+    <button class="cb opt" id="pip" title="画中画"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg></button>
+    <button class="cb" id="fs" title="全屏 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-enter"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-exit"><path d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4"/></svg></button>
+  </div>
+</div>
 <div id="hold">2x 快进中 <i>▶▶</i></div>
 <script>
 const $ = id => document.getElementById(id);
-const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}};
+const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}};
 let cur = null, token = 0, sent = false;
 let lastReport = 0;
 // report tells the app where the episode is, for the history.
@@ -240,7 +326,7 @@ const store = {
 // --- episodes ---
 const hasPrev = () => cur && cur.ep > 1;
 const hasNext = () => cur && (!cur.total || cur.ep < cur.total);
-function refreshNav() {
+let refreshNav = function () {
   $('prev').hidden = !hasPrev(); $('next').hidden = !hasNext(); $('endnext').hidden = !hasNext();
   if ('mediaSession' in navigator) {
     try {
@@ -322,12 +408,14 @@ function toggleFS() {
 // The <video>'s own full screen button: the app follows it.
 function fsChanged() {
   if (HOST_FS) post('/fullscreen?to=' + (fsEl() ? 'on' : 'off'));
+  else document.body.classList.toggle('full', !!fsEl());
   wake();
 }
 document.addEventListener('fullscreenchange', fsChanged);
 document.addEventListener('webkitfullscreenchange', fsChanged);
 
-window.smovie = { load, pause: () => { holdEnd(); v.pause(); }, exitFullScreen: exitFS };
+window.smovie = { load, pause: () => { holdEnd(); v.pause(); }, exitFullScreen: exitFS,
+  fullScreen: on => document.body.classList.toggle('full', !!on) };
 
 // --- playback ---
 v.addEventListener('play', () => { show('ended', false); wake(); });
@@ -358,10 +446,13 @@ $('retry').onclick = () => { show('error', false); if (cur) { post('/retry?v=' +
 let idleTimer;
 function wake() {
   document.body.classList.add('active'); clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => { if (!v.paused) document.body.classList.remove('active'); }, 2500);
+  idleTimer = setTimeout(() => { if (!v.paused && !busy()) document.body.classList.remove('active'); }, 2500);
 }
+// The controls stay while the pointer is on them, drags or a menu is open.
+let overBar = false;
+const busy = () => overBar || document.querySelector('.track.drag') || $('spdmenu').classList.contains('open');
 ['mousemove', 'mousedown'].forEach(e => document.addEventListener(e, wake));
-document.addEventListener('mouseleave', () => { if (!v.paused) document.body.classList.remove('active'); });
+document.addEventListener('mouseleave', () => { if (!v.paused && !busy()) document.body.classList.remove('active'); });
 v.addEventListener('pause', () => { if (!v.ended) report(false); clearTimeout(idleTimer); document.body.classList.add('active'); });
 
 // --- keys, from the page, or from the app while its own UI has the focus ---
@@ -439,7 +530,99 @@ window.addEventListener('blur', holdEnd);
 document.addEventListener('visibilitychange', holdEnd);
 window.smovie.key = k => k.startsWith('Shift+') ? key(k.slice(6), true) : key(k, false);
 
+// --- the custom controls ---
+const pad2 = n => String(n).padStart(2, '0');
+function hms(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
+  return (h ? h + ':' + pad2(m) : pad2(m)) + ':' + pad2(s % 60);
+}
+// slider makes el a horizontal slider: set(frac) as it is dragged or
+// clicked, done() once let go, tip(frac) the text over the pointer.
+function slider(el, set, done, tip) {
+  const frac = e => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  const tipEl = el.querySelector('.tip');
+  el.addEventListener('pointermove', e => {
+    if (!tipEl || !tip) return;
+    const f = frac(e); tipEl.textContent = tip(f); tipEl.style.left = (f * 100) + '%';
+  });
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault(); el.setPointerCapture(e.pointerId); el.classList.add('drag'); set(frac(e));
+  });
+  el.addEventListener('pointermove', e => { if (el.classList.contains('drag')) set(frac(e)); });
+  const end = e => { if (!el.classList.contains('drag')) return; el.classList.remove('drag'); if (done) done(frac(e)); wake(); };
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+}
+const setBar = (el, f) => {
+  f = Math.max(0, Math.min(1, f || 0)) * 100 + '%';
+  el.querySelector('.fill').style.width = f; el.querySelector('.knob').style.left = f;
+};
+let scrub = -1; // the time being dragged to
+function paintTime() {
+  const d = isFinite(v.duration) ? v.duration : 0, t = scrub >= 0 ? scrub : v.currentTime;
+  $('tcur').textContent = hms(t); $('tdur').textContent = hms(d);
+  setBar($('prog'), d ? t / d : 0);
+  let b = 0;
+  for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t + 0.5) b = Math.max(b, v.buffered.end(i));
+  $('prog').querySelector('.buf').style.width = (d ? 100 * b / d : 0) + '%';
+}
+function paintVolume() {
+  document.body.classList.toggle('muted', v.muted || v.volume === 0);
+  setBar($('volbar'), v.muted ? 0 : v.volume);
+}
+function paintSpeed() {
+  const r = v.playbackRate;
+  $('spd').textContent = (Math.round(r * 100) / 100) + 'x';
+  for (const b of $('spdmenu').children) b.classList.toggle('on', Math.abs(+b.dataset.r - r) < 0.01);
+}
+function togglePlay() { if (!v.getAttribute('src')) return; if (v.paused) v.play().catch(() => {}); else v.pause(); }
+function setupControls() {
+  document.body.classList.add('custom');
+  v.controls = false;
+  const bar = $('bar');
+  bar.addEventListener('mouseenter', () => { overBar = true; wake(); });
+  bar.addEventListener('mouseleave', () => { overBar = false; wake(); });
+  // Buttons take no focus, so that Space and the arrows stay the player's.
+  bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+  bar.addEventListener('dblclick', e => e.stopPropagation());
+  $('play').onclick = togglePlay;
+  $('back').onclick = () => seek(-10);
+  $('fwd').onclick = () => seek(10);
+  $('cprev').onclick = () => step('prev');
+  $('cnext').onclick = () => step('next');
+  $('fs').onclick = toggleFS;
+  $('mute').onclick = () => { if (v.muted || v.volume === 0) { v.muted = false; if (!v.volume) v.volume = 0.5; } else v.muted = true; };
+  if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
+    $('pip').onclick = () => (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(() => {});
+  } else $('pip').remove();
+  const menu = $('spdmenu');
+  for (const r of SPEEDS.slice().reverse()) {
+    const b = document.createElement('button');
+    b.dataset.r = r; b.textContent = r + 'x';
+    b.onclick = () => { v.playbackRate = r; store.set('speed', r); menu.classList.remove('open'); toast(r + 'x 倍速'); };
+    menu.appendChild(b);
+  }
+  $('spd').onclick = e => { e.stopPropagation(); menu.classList.toggle('open'); paintSpeed(); };
+  document.addEventListener('pointerdown', e => { if (!e.target.closest('.wrap')) menu.classList.remove('open'); });
+  slider($('prog'), f => { if (v.duration) { scrub = f * v.duration; paintTime(); } },
+    f => { if (v.duration) v.currentTime = Math.min(v.duration - 0.1, f * v.duration); scrub = -1; paintTime(); },
+    f => hms(f * (v.duration || 0)));
+  slider($('volbar'), f => { v.muted = false; v.volume = Math.round(f * 100) / 100; });
+  // A click on the picture plays or pauses; a double click is full screen.
+  v.addEventListener('click', togglePlay);
+  ['timeupdate', 'durationchange', 'progress', 'seeked', 'emptied', 'loadedmetadata'].forEach(e => v.addEventListener(e, paintTime));
+  v.addEventListener('volumechange', paintVolume);
+  v.addEventListener('ratechange', paintSpeed);
+  const playing = () => document.body.classList.toggle('playing', !v.paused);
+  v.addEventListener('play', playing); v.addEventListener('pause', playing);
+  const nav = refreshNav;
+  refreshNav = () => { nav(); $('cprev').disabled = !hasPrev(); $('cnext').disabled = !hasNext(); };
+  paintTime(); paintVolume(); paintSpeed(); refreshNav();
+}
+
 v.volume = store.get('volume', 1); v.muted = MUTED || store.get('muted', false);
+if (CUSTOM) setupControls();
 refreshNav();
 fetch('/current').then(r => r.json()).then(load).catch(() => {});
 </script>
