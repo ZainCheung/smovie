@@ -29,6 +29,7 @@ type feed struct {
 	loading    bool
 	err        string
 	seq        int
+	loadedAt   time.Time // of the first page, to refresh it once old
 }
 
 func (f *feed) more() bool { return !f.loading && f.page < f.totalPages }
@@ -55,6 +56,10 @@ type app struct {
 	history      []watched
 	confirmClear bool // asking whether to empty the history
 
+	saved      settings // as last saved
+	videoCache int      // index of videoCacheSizes
+	usage      usage
+
 	// What plays.
 	series    *hongguo.Series
 	detail    *hongguo.Detail
@@ -69,19 +74,25 @@ type app struct {
 }
 
 func newApp() *app {
-	return &app{
-		page:     "home",
-		backTo:   "home",
-		feeds:    map[string]*feed{},
-		aspects:  map[string]float32{},
-		scrolls:  map[string]*ui.ScrollState{},
-		lib:      newLibrary(),
-		theme:    netflixTheme(),
-		history:  loadHistory(),
-		autoNext: true,
-		current:  -1,
-		heroAt:   time.Now(),
+	st := loadSettings()
+	a := &app{
+		page:       "home",
+		backTo:     "home",
+		feeds:      map[string]*feed{},
+		aspects:    map[string]float32{},
+		scrolls:    map[string]*ui.ScrollState{},
+		lib:        newLibrary(),
+		theme:      netflixTheme(),
+		history:    loadHistory(),
+		autoNext:   st.AutoNext,
+		saved:      st,
+		videoCache: st.VideoCache,
+		current:    -1,
+		heroAt:     time.Now(),
 	}
+	a.lib.limit.Store(videoCacheSizes[st.VideoCache])
+	go a.lib.prune()
+	return a
 }
 
 func (a *app) feed(key string) *feed {
@@ -125,8 +136,21 @@ func (a *app) loadFeed(key string, page int) {
 			}
 			f.loading = false
 			if err != nil {
+				if page <= 1 && len(f.items) > 0 {
+					// Keeps what showed, from the disk or before, as its first
+					// page, and tries again in a minute.
+					f.page = max(f.page, 1)
+					f.loadedAt = time.Now().Add(time.Minute - catalogTTL)
+					return
+				}
 				f.err = err.Error()
 				return
+			}
+			if page <= 1 {
+				f.loadedAt = time.Now()
+				if key != "search" {
+					saveCatalog(key, p)
+				}
 			}
 			if page <= 1 {
 				f.items = nil
@@ -146,12 +170,30 @@ func (a *app) loadFeed(key string, page int) {
 }
 
 // ensureFeed loads the first page of a feed once.
+// A category shows at once what the disk kept of it, while it loads.
 func (a *app) ensureFeed(key string) *feed {
 	f := a.feed(key)
 	if f.page == 0 && !f.loading && f.err == "" {
+		if key != "search" && len(f.items) == 0 {
+			if p, ok := loadCatalog(key); ok {
+				f.items, f.page, f.totalPages = p.Items, 1, p.TotalPages
+				f.page = 0 // still loads it afresh below
+			}
+		}
 		a.loadFeed(key, 1)
 	}
 	return f
+}
+
+// refreshFeeds loads again the first page of the categories that loaded
+// long ago and showed no more of it, as the catalog changes.
+func (a *app) refreshFeeds() {
+	for _, cat := range hongguo.Categories {
+		f := a.feed(cat.Slug)
+		if f.page == 1 && !f.loading && time.Since(f.loadedAt) > catalogTTL {
+			a.loadFeed(cat.Slug, 1)
+		}
+	}
 }
 
 func (a *app) search(q string) {
@@ -172,6 +214,9 @@ func (a *app) go_(page string) {
 	}
 	if page != "watch" {
 		a.backTo = page
+	}
+	if page == "settings" && a.page != "settings" {
+		a.measureUsage()
 	}
 	a.page = page
 }
@@ -257,6 +302,7 @@ func (a *app) play(index int) {
 	j := a.lib.ensure(vid)
 	a.job = j
 	info := episodeInfo{VID: vid, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
+	a.lib.setPlaying(vid)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
 	a.playSeq++

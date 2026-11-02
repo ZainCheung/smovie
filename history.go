@@ -48,19 +48,7 @@ func (w watched) resumeAt(ep int) float64 {
 	return w.Position
 }
 
-// historyFile, when set, is where the history is kept instead: for tests.
-var historyFile string
-
-func historyPath() string {
-	if historyFile != "" {
-		return historyFile
-	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = os.TempDir()
-	}
-	return filepath.Join(dir, "smovie", "history.json")
-}
+func historyPath() string { return filepath.Join(configDir(), "history.json") }
 
 func loadHistory() []watched {
 	data, err := os.ReadFile(historyPath())

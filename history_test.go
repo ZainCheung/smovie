@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -60,7 +59,7 @@ func TestRemoveRestore(t *testing.T) {
 // The history page's delete button removes the entry without opening it,
 // and clearing all asks first.
 func TestHistoryPageDelete(t *testing.T) {
-	historyFile = filepath.Join(t.TempDir(), "history.json")
+	configOverride = t.TempDir()
 	a := newApp()
 	a.history = testHistory()
 	a.page = "history"
@@ -105,5 +104,22 @@ func TestHistoryPageDelete(t *testing.T) {
 	tt.Frame()
 	if len(a.history) != 0 || !tt.HasText("还没有观看记录") {
 		t.Fatalf("not cleared: %d", len(a.history))
+	}
+}
+
+func TestCatalogCacheRoundTrip(t *testing.T) {
+	configOverride = t.TempDir()
+	p := &hongguo.Page{Items: []hongguo.Series{{ID: "1000001", Title: "剧"}}, Page: 1, TotalPages: 9}
+	saveCatalog("real-drama", p)
+	var got *hongguo.Page
+	for range 100 {
+		if q, ok := loadCatalog("real-drama"); ok {
+			got = q
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got == nil || got.TotalPages != 9 || got.Items[0].Title != "剧" {
+		t.Fatalf("got %+v", got)
 	}
 }

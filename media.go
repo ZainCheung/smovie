@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,9 +16,11 @@ import (
 // library keeps decrypted episodes on disk and the jobs preparing them, so
 // the episode playing and the one prefetched after it share one download.
 type library struct {
-	dir  string
-	mu   sync.Mutex
-	jobs map[string]*job
+	dir   string
+	mu    sync.Mutex
+	jobs  map[string]*job
+	limit atomic.Int64 // bytes of episodes kept on disk
+	keep  atomic.Value // string: the episode playing, which stays
 }
 
 // job prepares one episode. Its fields other than done are safe to read
@@ -58,8 +61,8 @@ func newLibrary() *library {
 		base = os.TempDir()
 	}
 	l := &library{dir: filepath.Join(base, "smovie", "media"), jobs: map[string]*job{}}
+	l.limit.Store(videoCacheSizes[defaultVideoCache])
 	_ = os.MkdirAll(l.dir, 0o755)
-	go l.prune(60)
 	return l
 }
 
@@ -80,6 +83,8 @@ func (l *library) ensure(vid string) *job {
 	j := &job{done: make(chan struct{})}
 	l.jobs[vid] = j
 	if l.cached(vid) {
+		now := time.Now()
+		_ = os.Chtimes(l.path(vid), now, now) // used again: pruned last
 		j.phase.Store("ready")
 		close(j.done)
 		return j
@@ -112,38 +117,81 @@ func (l *library) ensure(vid string) *job {
 			return
 		}
 		j.phase.Store("ready")
-		go l.prune(60)
+		go l.prune()
 	}()
 	return j
 }
 
-// prune keeps the newest keep episodes.
-func (l *library) prune(keep int) {
+// setLimit keeps at most limit bytes of episodes on disk.
+func (l *library) setLimit(limit int64) {
+	l.limit.Store(limit)
+	go l.prune()
+}
+
+// setPlaying tells the episode playing, which pruning leaves.
+func (l *library) setPlaying(vid string) { l.keep.Store(vid) }
+
+// busy reports whether vid plays or is being prepared.
+func (l *library) busy(vid string) bool {
+	if k, _ := l.keep.Load().(string); k == vid {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	j := l.jobs[vid]
+	return j != nil && !j.Finished()
+}
+
+// prune removes the episodes used longest ago once they take more than
+// the limit, leaving those that play or are being prepared.
+func (l *library) prune() { l.pruneTo(l.limit.Load()) }
+
+func (l *library) pruneTo(limit int64) {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return
 	}
 	type file struct {
-		path string
-		mod  time.Time
+		path, vid string
+		size      int64
+		mod       time.Time
 	}
 	var files []file
+	var total int64
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".mp4" {
 			continue
 		}
 		if info, err := e.Info(); err == nil {
-			files = append(files, file{filepath.Join(l.dir, e.Name()), info.ModTime()})
+			files = append(files, file{filepath.Join(l.dir, e.Name()), strings.TrimSuffix(e.Name(), ".mp4"), info.Size(), info.ModTime()})
+			total += info.Size()
 		}
 	}
-	if len(files) <= keep {
-		return
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
-	for _, f := range files[keep:] {
-		_ = os.Remove(f.path)
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	for _, f := range files {
+		if total <= limit {
+			break
+		}
+		if l.busy(f.vid) {
+			continue
+		}
+		if os.Remove(f.path) == nil {
+			total -= f.size
+			l.mu.Lock()
+			if j := l.jobs[f.vid]; j != nil && j.Finished() {
+				delete(l.jobs, f.vid) // prepares it again when asked
+			}
+			l.mu.Unlock()
+		}
 	}
 }
+
+// clear removes the episodes on disk, but for those that play or are
+// being prepared.
+func (l *library) clear() { l.pruneTo(0) }
+
+// usage is the bytes of episodes on disk.
+func (l *library) usage() int64 { return dirSize(l.dir) }
 
 // episodeStatus is what the player page shows while an episode is prepared.
 type episodeStatus struct {

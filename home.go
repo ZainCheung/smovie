@@ -28,6 +28,8 @@ func (a *app) heroHeight(c *ui.Context) float32 {
 // --- home ---
 
 func (a *app) homePage(c *ui.Context) {
+	a.refreshFeeds()
+	c.After(time.Minute) // to look again
 	featured := a.feed(hongguo.Categories[0].Slug)
 	if n := min(len(featured.items), heroCount); n > 0 {
 		if time.Since(a.heroAt) >= heroCycle {
