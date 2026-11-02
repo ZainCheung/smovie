@@ -69,17 +69,17 @@ type app struct {
 
 func newApp() *app {
 	return &app{
-		page:      "home",
-		backTo:    "home",
-		feeds:     map[string]*feed{},
-		aspects:   map[string]float32{},
-		scrolls:   map[string]*ui.ScrollState{},
-		lib:       newLibrary(),
-		theme:     netflixTheme(),
-		history:   loadHistory(),
-		autoNext:  true,
-		current:   -1,
-		heroAt:    time.Now(),
+		page:     "home",
+		backTo:   "home",
+		feeds:    map[string]*feed{},
+		aspects:  map[string]float32{},
+		scrolls:  map[string]*ui.ScrollState{},
+		lib:      newLibrary(),
+		theme:    netflixTheme(),
+		history:  loadHistory(),
+		autoNext: true,
+		current:  -1,
+		heroAt:   time.Now(),
 	}
 }
 
