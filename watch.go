@@ -91,6 +91,22 @@ func (a *app) watchPage(c *ui.Context) {
 	})
 }
 
+// fullPlayer is the player alone, filling the window in full screen.
+// Escape and F leave it, as the page's do once it has the keyboard.
+func (a *app) fullPlayer(c *ui.Context) {
+	if c.Shortcut(0, ui.KeyEscape) || c.Shortcut(0, ui.KeyF) {
+		a.setPlayerFull(false)
+		return
+	}
+	for _, k := range playerKeys {
+		if k.key != ui.KeyF && c.Shortcut(k.mods, k.key) {
+			a.tellPlayer("smovie.key", k.name)
+			a.player.Focus()
+		}
+	}
+	ui.WebView(c, a.player).Fill().Background(rgba(0, 0, 0, 255))
+}
+
 func (a *app) watchInfo(c *ui.Context, wide bool) {
 	s := *a.series
 	if a.detail != nil {

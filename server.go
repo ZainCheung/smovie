@@ -28,6 +28,9 @@ type playerEvents struct {
 	step  func(vid string, delta int, ended bool)
 	retry func(vid string)
 	meta  func(vid string, width, height int)
+	// fullScreen asks for the player to fill the screen: "on", "off" or
+	// "toggle".
+	fullScreen func(to string)
 	// progress tells where vid is, of its duration, and that it ended.
 	progress func(vid string, pos, dur float64, ended bool)
 }
@@ -61,7 +64,8 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		if os.Getenv("SMOVIE_MUTED") != "" {
 			muted = "true" // for automated runs
 		}
-		_, _ = strings.NewReplacer("{{MUTED}}", muted).WriteString(w, playerHTML)
+		hostFS := strconv.FormatBool(hostFullScreen)
+		_, _ = strings.NewReplacer("{{MUTED}}", muted, "{{HOST_FS}}", hostFS).WriteString(w, playerHTML)
 	})
 	mux.HandleFunc("GET /media/{file}", s.media)
 	mux.HandleFunc("GET /current", func(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +108,13 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		height, _ := strconv.Atoi(q.Get("h"))
 		if vid := q.Get("v"); vidPattern.MatchString(vid) && width > 0 && height > 0 {
 			s.events.meta(vid, width, height)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /fullscreen", func(w http.ResponseWriter, r *http.Request) {
+		switch to := r.URL.Query().Get("to"); to {
+		case "on", "off", "toggle":
+			s.events.fullScreen(to)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -208,7 +219,7 @@ body.active .side{opacity:1;pointer-events:auto}
 <div id="hold">2x 快进中 <i>▶▶</i></div>
 <script>
 const $ = id => document.getElementById(id);
-const v = $('v'), MUTED = {{MUTED}};
+const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}};
 let cur = null, token = 0, sent = false;
 let lastReport = 0;
 // report tells the app where the episode is, for the history.
@@ -293,18 +304,30 @@ function step(to) {
 // which keeps the controls, the video's own, and the buttons over it; in
 // the controls' full screen, Shift+arrows and the media keys change
 // episodes.
+// With HOST_FS (Windows, Linux) the app fills the screen with the player
+// instead: there a page's full screen only fills its web view, which sits
+// small in the window, and WebView2 leaves growing it to the app.
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
 const root = document.documentElement;
+function exitFS() {
+  try { if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
+}
 function toggleFS() {
+  if (HOST_FS) return post('/fullscreen?to=toggle');
   try {
     if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
     else (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
   } catch (_) {}
 }
-document.addEventListener('fullscreenchange', () => wake());
-document.addEventListener('webkitfullscreenchange', () => wake());
+// The <video>'s own full screen button: the app follows it.
+function fsChanged() {
+  if (HOST_FS) post('/fullscreen?to=' + (fsEl() ? 'on' : 'off'));
+  wake();
+}
+document.addEventListener('fullscreenchange', fsChanged);
+document.addEventListener('webkitfullscreenchange', fsChanged);
 
-window.smovie = { load, pause: () => { holdEnd(); v.pause(); } };
+window.smovie = { load, pause: () => { holdEnd(); v.pause(); }, exitFullScreen: exitFS };
 
 // --- playback ---
 v.addEventListener('play', () => { show('ended', false); wake(); });
@@ -371,6 +394,7 @@ function key(k, shift) {
   else if (k === ']' || k === '=') speed(1);
   else if (k === '\\') { v.playbackRate = 1; store.set('speed', 1); toast('1x 倍速'); }
   else if (k === 'f' || k === 'F') toggleFS();
+  else if (k === 'Escape' && HOST_FS) post('/fullscreen?to=off');
   else return false;
   wake(); return true;
 }

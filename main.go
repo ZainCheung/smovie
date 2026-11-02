@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"time"
 
@@ -82,6 +83,11 @@ type app struct {
 	aspects   map[string]float32 // width over height, by episode
 	autoNext  bool
 	epRange   int // which block of 50 episodes the list shows
+
+	// The player fills the screen (hostFullScreen); the window was not in
+	// full screen before, so it leaves it after.
+	playerFull     bool
+	windowedBefore bool
 }
 
 func newApp() *app {
@@ -419,6 +425,51 @@ func (a *app) forgetAll() {
 	saveHistory(nil)
 }
 
+// hostFullScreen is where the app, rather than the web view, puts the
+// player in full screen: WebView2 (Windows) and WebKitGTK only fill the
+// web view with a page's full screen, which stays at its size in the
+// window. WKWebView (macOS) shows it in a full screen window of its own.
+var hostFullScreen = runtime.GOOS != "darwin"
+
+// fullScreen is the player page's request: "on", "off" or "toggle".
+func (a *app) fullScreen(to string) {
+	if !hostFullScreen {
+		return
+	}
+	a.win.Update(func() {
+		switch to {
+		case "on":
+			a.setPlayerFull(true)
+		case "off":
+			a.setPlayerFull(false)
+		case "toggle":
+			a.setPlayerFull(!a.playerFull)
+		}
+	})
+}
+
+// setPlayerFull shows the player alone over the whole screen, or leaves
+// that. It runs on the main thread.
+func (a *app) setPlayerFull(on bool) {
+	if on == a.playerFull || on && a.page != "watch" {
+		return
+	}
+	a.playerFull = on
+	if on {
+		a.windowedBefore = !a.win.IsFullScreen()
+		if a.windowedBefore {
+			a.win.SetFullScreen(true)
+		}
+	} else {
+		if a.windowedBefore {
+			a.win.SetFullScreen(false)
+		}
+		// The <video>'s own full screen button put the page in full screen.
+		a.tellPlayer("smovie.exitFullScreen", nil)
+	}
+	a.win.Invalidate()
+}
+
 func (a *app) meta(vid string, w, h int) {
 	a.win.Update(func() { a.aspects[vid] = float32(w) / float32(h) })
 }
@@ -454,7 +505,7 @@ var onReady func(*app)
 
 func main() {
 	a := newApp()
-	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress})
+	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress, fullScreen: a.fullScreen})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -473,6 +524,8 @@ func main() {
 			Content:         ui.View(a.view),
 		})
 		win := a.win
+		// Leaving full screen by the system's means, such as F11, leaves the player's too.
+		win.OnLeaveFullScreen(func() { win.Update(func() { a.setPlayerFull(false) }) })
 		a.images = newImageCache(win.Invalidate)
 		a.player, err = a.win.NewWebView(mygo.WebViewOptions{
 			BackgroundColor: "#000000",

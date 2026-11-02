@@ -52,6 +52,13 @@ func (a *app) view(c *ui.Context) {
 	}
 	c.SetTheme(a.theme)
 	c.Root().Background(colorBG)
+	if a.playerFull {
+		if a.page == "watch" {
+			a.fullPlayer(c)
+			return
+		}
+		a.setPlayerFull(false)
+	}
 	st := a.scroll(a.page)
 	ui.Box(c).Fill().Children(func() {
 		ui.Scroll(c.Key(a.page)).Fill().TrackScroll(st).Children(func() {
