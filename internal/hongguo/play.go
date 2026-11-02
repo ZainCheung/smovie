@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -571,94 +570,4 @@ func FFmpeg() string {
 		}
 	}
 	return ""
-}
-
-// Download saves an episode's media, decrypted, to dst. progress gets the
-// bytes received and the total (0 when unknown).
-func Download(ctx context.Context, info *PlayInfo, dst string, progress func(received, total int64)) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", info.UserAgent)
-	client := &http.Client{} // no overall timeout: media can be large
-	res, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("视频下载失败：%w", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("视频下载失败（HTTP %d）", res.StatusCode)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".dl-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	encrypted := filepath.Join(tmp, "source.mp4")
-	f, err := os.Create(encrypted)
-	if err != nil {
-		return err
-	}
-	total := res.ContentLength
-	var received int64
-	buf := make([]byte, 256<<10)
-	last := time.Time{}
-	for {
-		n, rerr := res.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				f.Close()
-				return werr
-			}
-			received += int64(n)
-			if progress != nil && time.Since(last) > 120*time.Millisecond {
-				progress(received, max(total, 0))
-				last = time.Now()
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			f.Close()
-			return fmt.Errorf("视频下载中断：%w", rerr)
-		}
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if total > 0 && received != total {
-		return errors.New("视频下载不完整")
-	}
-	if progress != nil {
-		progress(received, received)
-	}
-	out := filepath.Join(tmp, "out.mp4")
-	if info.ContentKey == "" {
-		out = encrypted
-	} else {
-		ff := FFmpeg()
-		if ff == "" {
-			return errors.New("未找到 ffmpeg，无法解密片源。请先安装：brew install ffmpeg")
-		}
-		cmd := exec.CommandContext(ctx, ff, "-y", "-hide_banner", "-loglevel", "error",
-			"-decryption_key", info.ContentKey, "-i", encrypted, "-map", "0:v:0", "-map", "0:a?",
-			"-c", "copy", "-tag:v", videoTag(info.Codec), "-movflags", "+faststart", "-f", "mp4", out)
-		if msg, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("片源解密失败：%v %s", err, strings.TrimSpace(string(msg)))
-		}
-	}
-	return os.Rename(out, dst)
-}
-
-// videoTag names the sample entry WebKit plays: hvc1 rather than hev1.
-func videoTag(codec string) string {
-	if codec == "hevc" || codec == "h265" || codec == "hvc1" || codec == "hev1" {
-		return "hvc1"
-	}
-	return "avc1"
 }

@@ -158,13 +158,116 @@ func (s *mediaServer) setCurrent(info episodeInfo) {
 
 func (s *mediaServer) media(w http.ResponseWriter, r *http.Request) {
 	vid := strings.TrimSuffix(r.PathValue("file"), ".mp4")
-	if !vidPattern.MatchString(vid) || !s.lib.cached(vid) {
+	if !vidPattern.MatchString(vid) {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, s.lib.path(vid))
+	if s.lib.cached(vid) {
+		http.ServeFile(w, r, s.lib.path(vid))
+		return
+	}
+	if j := s.lib.streaming(vid); j != nil {
+		serveGrowing(w, r, j, s.lib.path(vid))
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// serveGrowing serves a file that a job writes in place, of the size it
+// will have, answering a range as its bytes come.
+func serveGrowing(w http.ResponseWriter, r *http.Request, j *job, path string) {
+	total := j.total.Load()
+	start, end, ok := parseRange(r.Header.Get("Range"), total)
+	if !ok {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(total, 10))
+		http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	h := w.Header()
+	h.Set("Accept-Ranges", "bytes")
+	h.Set("Content-Length", strconv.FormatInt(end-start, 10))
+	if r.Header.Get("Range") != "" {
+		h.Set("Content-Range", "bytes "+strconv.FormatInt(start, 10)+"-"+strconv.FormatInt(end-1, 10)+"/"+strconv.FormatInt(total, 10))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	if r.Method == http.MethodHead {
+		return
+	}
+	buf := make([]byte, 256<<10)
+	for at := start; at < end; {
+		changed := j.changed()
+		ready := j.ready.Load()
+		if at >= ready {
+			if j.Finished() {
+				if j.err != nil || j.ready.Load() <= at {
+					panic(http.ErrAbortHandler) // the player sees it fail
+				}
+				continue
+			}
+			select {
+			case <-changed:
+				continue
+			case <-r.Context().Done():
+				return
+			}
+		}
+		n, err := f.ReadAt(buf[:min(int64(len(buf)), ready-at, end-at)], at)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			at += int64(n)
+		}
+		if err != nil && n == 0 {
+			panic(http.ErrAbortHandler)
+		}
+	}
+}
+
+// parseRange reads a Range header of one range, returning the bytes it
+// asks for, [start, end), and all of them for none.
+func parseRange(v string, total int64) (start, end int64, ok bool) {
+	if v == "" {
+		return 0, total, true
+	}
+	spec, found := strings.CutPrefix(v, "bytes=")
+	if !found || strings.Contains(spec, ",") {
+		return 0, 0, false
+	}
+	a, b, found := strings.Cut(strings.TrimSpace(spec), "-")
+	if !found {
+		return 0, 0, false
+	}
+	if a == "" { // the last b bytes
+		n, err := strconv.ParseInt(b, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, false
+		}
+		return max(total-n, 0), total, true
+	}
+	start, err := strconv.ParseInt(a, 10, 64)
+	if err != nil || start < 0 || start >= total {
+		return 0, 0, false
+	}
+	end = total
+	if b != "" {
+		last, err := strconv.ParseInt(b, 10, 64)
+		if err != nil || last < start {
+			return 0, 0, false
+		}
+		end = min(last+1, total)
+	}
+	return start, end, true
 }
 
 // playerHTML plays episodes with WebKit's own controls. They take no
@@ -361,7 +464,7 @@ async function poll(my) {
   let st;
   try { st = await (await fetch('/status?v=' + cur.vid)).json(); } catch (_) { st = {phase: 'resolving'}; }
   if (my !== token) return;
-  if (st.phase === 'ready') {
+  if (st.phase === 'ready' || st.stream) {
     show('loading', false);
     v.src = '/media/' + cur.vid + '.mp4';
     v.play().catch(() => {});
