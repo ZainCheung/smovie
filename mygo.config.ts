@@ -1,10 +1,18 @@
 import { defineConfig } from "mygo-cli";
+import pkg from "./package.json" with { type: "json" };
 
 // Native UI app: no frontend to develop or build. The player's <video>
 // page is served by the Go app itself (server.go).
 export default defineConfig({
   name: "smovie",
   identifier: "com.example.smovie",
-  version: "0.1.0",
+  // CI checks that a release tag vX.Y.Z matches this.
+  version: pkg.version,
   out: "build",
+  // Windows .ico (16–256 px) and Linux icons are rendered from this 1024 px
+  // PNG. It lives outside resources/, which ships inside the app as is.
+  icon: "icon/icon.png",
+  // macOS: the Icon Composer document (open it in Icon Composer to edit),
+  // compiled with Xcode 26+; without it the build falls back to icon.png.
+  macos: { icon: "icon/AppIcon.icon" },
 });
