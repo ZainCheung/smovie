@@ -7,7 +7,7 @@ package main
 // saves the player page's screenshot to $SMOVIE_PAGE_SHOT, which the
 // window's own capture leaves blank where the web view shows; SIGUSR2
 // runs $SMOVIE_EVAL, or the script in $SMOVIE_EVAL_FILE, in the player page, or pauses it, which then shows its
-// controls.
+// controls. SMOVIE_CONFIG names the directory of the history and settings.
 import (
 	"fmt"
 	"os"
@@ -18,6 +18,11 @@ import (
 )
 
 func init() {
+	// SMOVIE_CONFIG keeps a test's history and settings apart from the
+	// user's.
+	if dir := os.Getenv("SMOVIE_CONFIG"); dir != "" {
+		configOverride = dir
+	}
 	onReady = func(a *app) {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGUSR1, syscall.SIGUSR2)

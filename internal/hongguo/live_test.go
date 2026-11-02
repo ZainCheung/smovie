@@ -49,3 +49,32 @@ func TestLive(t *testing.T) {
 		}
 	}
 }
+
+// go test -run LiveSocial ./internal/hongguo -v  (with SMOVIE_LIVE=1)
+func TestLiveSocial(t *testing.T) {
+	if os.Getenv("SMOVIE_LIVE") == "" {
+		t.Skip("set SMOVIE_LIVE=1 to hit the network")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	const id = "7503745441910017049"
+	info, err := Info(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("info: %.1f (%d) likes=%d favs=%d heat=%s first=%s cast=%d reviews=%d/%d %+v",
+		info.Rating, info.RatingCount, info.Likes, info.Favorites, info.Heat, info.FirstShown.Format("2006-01-02"),
+		len(info.Cast), len(info.Reviews.Items), info.Reviews.Total, info.Reviews.Items[0])
+	d, err := Episodes(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep, err := Episode(ctx, id, d.VIDs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("episode 2: likes=%d reviews=%d/%d", ep.Likes, len(ep.Reviews.Items), ep.Reviews.Total)
+	if _, err := Episode(ctx, id, d.VIDs[40]); err != ErrLocked {
+		t.Fatalf("episode 41: %v, want ErrLocked", err)
+	}
+}

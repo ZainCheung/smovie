@@ -84,6 +84,13 @@ type app struct {
 	autoNext  bool
 	epRange   int // which block of 50 episodes the list shows
 
+	// What the site tells of series and episodes, by ID, for the watch
+	// page; which comments it shows, and whether the description is open.
+	infos     map[string]*loaded[hongguo.SeriesInfo]
+	epInfos   map[string]*loaded[hongguo.EpisodeInfo]
+	seriesTab bool
+	descOpen  bool
+
 	// The player fills the screen (hostFullScreen); the window was not in
 	// full screen before, so it leaves it after.
 	playerFull     bool
@@ -103,6 +110,8 @@ func newApp() *app {
 		history:      loadHistory(),
 		myList:       loadMyList(),
 		episodeCache: map[string]*hongguo.Detail{},
+		infos:        map[string]*loaded[hongguo.SeriesInfo]{},
+		epInfos:      map[string]*loaded[hongguo.EpisodeInfo]{},
 		autoNext:     st.AutoNext,
 		saved:        st,
 		videoCache:   st.VideoCache,
@@ -286,6 +295,7 @@ func (a *app) openAt(s hongguo.Series, ep int) {
 	}
 	a.series = &s
 	a.detail, a.detailErr = nil, ""
+	a.seriesTab, a.descOpen = false, false
 	a.current, a.job = -1, nil
 	a.epRange = start / epBlock
 	a.tellPlayer("smovie.pause", nil)
