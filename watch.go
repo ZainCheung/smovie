@@ -34,6 +34,9 @@ func (a *app) watchPage(c *ui.Context) {
 		for _, k := range playerKeys {
 			if c.Shortcut(k.mods, k.key) {
 				a.tellPlayer("smovie.key", k.name)
+				// The page takes the keys from now on: a held key's repeats and
+				// its release, which hold → at 2x, reach it only there.
+				a.player.Focus()
 			}
 		}
 	}
@@ -127,7 +130,7 @@ func (a *app) watchInfo(c *ui.Context, wide bool) {
 		ui.Text(c, "自动连播").FontSize(13).TextColor(colorMuted)
 		ui.Switch(c.Key("auto"), &a.autoNext).Label("自动连播")
 	})
-	ui.Text(c, "快捷键：空格 播放/暂停 · ←/→ 快退/快进 5 秒 · ↑/↓ 音量 · M 静音 · [ / ] 倍速 · F 全屏 · Shift+←/→ 上/下一集").
+	ui.Text(c, "快捷键：空格 播放/暂停 · ←/→ 快退/快进 5 秒 · 长按 → 2 倍速 · ↑/↓ 音量 · M 静音 · [ / ] 倍速 · F 全屏 · Shift+←/→ 上/下一集").
 		FontSize(12).TextColor(colorFaint)
 	ui.Box(c).Height(1).Background(rgba(255, 255, 255, 30)).Margin(10, 0, 4, 0)
 	ui.Row(c).AlignItems(ui.Center).Gap(12).Children(func() {

@@ -181,6 +181,11 @@ body.active .side{opacity:1;pointer-events:auto}
 .pill{display:inline-flex;align-items:center;gap:8px;padding:10px 22px;border-radius:6px;font-size:15px;font-weight:700;background:rgba(109,109,110,.7)}
 .pill.primary{background:#fff;color:#000}
 .pill[hidden]{display:none}
+#hold{position:fixed;left:50%;top:18px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:7px 16px;border-radius:18px;
+  background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(12px);font-size:14px;font-weight:700;opacity:0;transition:opacity .15s;pointer-events:none}
+#hold.show{opacity:1}
+#hold i{font-style:normal;letter-spacing:-3px;animation:pulse .8s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
 #toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 16px;border-radius:10px;background:rgba(0,0,0,.75);
   font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
@@ -200,6 +205,7 @@ body.active .side{opacity:1;pointer-events:auto}
   <div style="display:flex;gap:12px"><button class="pill" id="replay">重播</button><button class="pill primary" id="endnext">下一集</button></div>
 </div>
 <div id="toast"></div>
+<div id="hold">2x 快进中 <i>▶▶</i></div>
 <script>
 const $ = id => document.getElementById(id);
 const v = $('v'), MUTED = {{MUTED}};
@@ -298,14 +304,14 @@ function toggleFS() {
 document.addEventListener('fullscreenchange', () => wake());
 document.addEventListener('webkitfullscreenchange', () => wake());
 
-window.smovie = { load, pause: () => v.pause() };
+window.smovie = { load, pause: () => { holdEnd(); v.pause(); } };
 
 // --- playback ---
 v.addEventListener('play', () => { show('ended', false); wake(); });
 v.addEventListener('volumechange', () => { if (!MUTED) { store.set('volume', v.volume); store.set('muted', v.muted); } });
-v.addEventListener('ratechange', () => { if (v.readyState) store.set('speed', v.playbackRate); });
+v.addEventListener('ratechange', () => { if (v.readyState && !hold.on) store.set('speed', v.playbackRate); });
 v.addEventListener('loadedmetadata', () => {
-  v.playbackRate = store.get('speed', 1);
+  v.playbackRate = hold.on ? HOLD_RATE : store.get('speed', 1);
   if (cur && cur.start > 3 && cur.start < v.duration - 5) { v.currentTime = cur.start; toast('从 ' + clock(cur.start) + ' 继续播放'); }
   if (cur && v.videoWidth) post('/meta?v=' + cur.vid + '&w=' + v.videoWidth + '&h=' + v.videoHeight);
 });
@@ -368,11 +374,45 @@ function key(k, shift) {
   else return false;
   wake(); return true;
 }
+// Holding → plays at 2x until it is let go, as video apps have it; a
+// tap still skips 5 seconds. The OS repeats a held key: a repeat with no
+// press seen, as when the app's own UI took the press, starts it too.
+const HOLD_RATE = 2, HOLD_DELAY = 300;
+const hold = { on: false, timer: 0, rate: 1 };
+function holdStart() {
+  clearTimeout(hold.timer); hold.timer = 0;
+  if (hold.on || !v.getAttribute('src')) return;
+  hold.on = true; hold.rate = v.playbackRate;
+  v.playbackRate = HOLD_RATE;
+  if (v.paused) v.play().catch(() => {});
+  $('hold').classList.add('show'); wake();
+}
+function holdEnd() {
+  clearTimeout(hold.timer); hold.timer = 0;
+  if (!hold.on) return;
+  hold.on = false;
+  v.playbackRate = store.get('speed', hold.rate);
+  $('hold').classList.remove('show');
+}
 // In the capture phase, so that the <video>'s own keys don't act twice.
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'ArrowRight' && !e.shiftKey) {
+    e.preventDefault(); e.stopPropagation();
+    if (e.repeat) { if (!hold.on) holdStart(); }
+    else if (!hold.timer && !hold.on) hold.timer = setTimeout(holdStart, HOLD_DELAY);
+    return;
+  }
   if (key(e.key, e.shiftKey)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
+document.addEventListener('keyup', e => {
+  if (e.key !== 'ArrowRight') return;
+  e.preventDefault(); e.stopPropagation();
+  if (hold.timer) { clearTimeout(hold.timer); hold.timer = 0; seek(5); wake(); }
+  else holdEnd();
+}, true);
+window.addEventListener('blur', holdEnd);
+document.addEventListener('visibilitychange', holdEnd);
 window.smovie.key = k => k.startsWith('Shift+') ? key(k.slice(6), true) : key(k, false);
 
 v.volume = store.get('volume', 1); v.muted = MUTED || store.get('muted', false);

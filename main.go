@@ -267,6 +267,7 @@ func (a *app) openAt(s hongguo.Series, ep int) {
 		a.backTo = a.page
 	}
 	a.page = "watch"
+	a.player.Focus() // the player takes the keys, as streaming apps' do
 	if a.series != nil && a.series.ID == s.ID {
 		if ep >= 0 && a.detail != nil && ep != a.current {
 			a.play(min(ep, len(a.detail.VIDs)-1))
