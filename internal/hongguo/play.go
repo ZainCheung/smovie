@@ -227,18 +227,10 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 	}
 	var body []byte
 	for attempt := 0; attempt < 2; attempt++ {
-		q := url.Values{}
-		for k, v := range deviceQuery {
-			q.Set(k, v)
+		req, signErr := playbackRequest(ctx, payload, dev, time.Now())
+		if signErr != nil {
+			return nil, signErr
 		}
-		q.Set("device_id", dev.DeviceID)
-		q.Set("iid", dev.IID)
-		q.Set("cdid", dev.CDID)
-		q.Set("_rticket", strconv.FormatInt(time.Now().UnixMilli(), 10))
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, videoAPI+"?"+q.Encode(), bytes.NewReader(payload))
-		req.Header.Set("User-Agent", playbackUA)
-		req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
-		req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 		body, err = doJSON(req)
 		if err == nil {
 			break
