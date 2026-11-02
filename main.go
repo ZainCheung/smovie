@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -34,11 +33,6 @@ type feed struct {
 
 func (f *feed) more() bool { return !f.loading && f.page < f.totalPages }
 
-type cover struct {
-	img    ui.ImageSource
-	failed bool
-}
-
 type app struct {
 	win    *mygo.Window
 	player *mygo.WebView
@@ -56,10 +50,7 @@ type app struct {
 	hero    int // which featured series the home banner shows
 	heroAt  time.Time
 
-	coverMu   sync.Mutex
-	covers    map[string]*cover
-	coverWant map[string]bool
-	coverSem  chan struct{}
+	images *imageCache
 
 	history []watched
 
@@ -83,9 +74,6 @@ func newApp() *app {
 		feeds:     map[string]*feed{},
 		aspects:   map[string]float32{},
 		scrolls:   map[string]*ui.ScrollState{},
-		covers:    map[string]*cover{},
-		coverWant: map[string]bool{},
-		coverSem:  make(chan struct{}, 16),
 		lib:       newLibrary(),
 		theme:     netflixTheme(),
 		history:   loadHistory(),
@@ -185,39 +173,6 @@ func (a *app) go_(page string) {
 		a.backTo = page
 	}
 	a.page = page
-}
-
-// coverOf returns a poster, starting its download the first time it shows.
-func (a *app) coverOf(url string) *cover {
-	if url == "" {
-		return nil
-	}
-	a.coverMu.Lock()
-	defer a.coverMu.Unlock()
-	if c, ok := a.covers[url]; ok {
-		return c
-	}
-	if a.coverWant[url] {
-		return nil
-	}
-	a.coverWant[url] = true
-	go func() {
-		a.coverSem <- struct{}{}
-		defer func() { <-a.coverSem }()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		c := &cover{}
-		data, err := hongguo.FetchImage(ctx, url)
-		if err == nil {
-			c.img, err = ui.DecodeImage(data)
-		}
-		c.failed = err != nil
-		a.coverMu.Lock()
-		a.covers[url] = c
-		a.coverMu.Unlock()
-		a.win.Invalidate()
-	}()
-	return nil
 }
 
 func (a *app) lastEpisode(id string) (int, bool) {
@@ -384,6 +339,8 @@ func main() {
 			BackgroundColor: "#141414",
 			Content:         ui.View(a.view),
 		})
+		win := a.win
+		a.images = newImageCache(win.Invalidate)
 		a.player, err = a.win.NewWebView(mygo.WebViewOptions{
 			BackgroundColor: "#000000",
 			Page: mygo.PageOptions{

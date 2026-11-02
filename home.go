@@ -85,7 +85,8 @@ func (a *app) heroPlaceholder(c *ui.Context, f *feed) {
 func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 	w, _ := c.Size()
 	h := a.heroHeight(c)
-	cv := a.coverOf(s.Cover)
+	backdrop := a.images.Get(c, s.Cover, imgSmall, true)
+	poster := a.images.Get(c, s.Cover, imgLarge, true)
 	titleSize := float32(42)
 	if n := utf8.RuneCountInString(s.Title); n > 24 {
 		titleSize = 30
@@ -98,8 +99,8 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 	// it, and Absolute's backdrop cannot paint over the content.
 	ui.Column(c.Key("hero-" + s.ID)).Children(func() {
 		ui.Box(c).Height(h).Clip().Children(func() {
-			if cv != nil && cv.img != nil {
-				ui.Image(c, cv.img).Absolute().Left(-60).Top(-60).Size(w+120, h+120).Fit(ui.Cover).Blur(36).Opacity(0.75)
+			if backdrop.Img != nil {
+				ui.Image(c, backdrop.Img).Absolute().Left(-60).Top(-60).Size(w+120, h+120).Fit(ui.Cover).Blur(36).Opacity(0.75 * backdrop.Fade)
 			}
 			// Darken toward the text, and fade into the page below.
 			ui.Box(c).Absolute().Left(0).Top(0).Size(w, h).LinearGradient(ui.LinearGradient{
@@ -136,9 +137,8 @@ func (a *app) heroBanner(c *ui.Context, s hongguo.Series, extra func()) {
 			})
 			// The poster keeps to the right edge however wide the window.
 			ui.Spacer(c)
-			if cv != nil && cv.img != nil {
-				ph := h - navHeight - 28 - 96
-				ui.Image(c, cv.img).Height(ph).Width(ph*3/4).Shrink(0).Fit(ui.Cover).Radius(10).
+			if ph := h - navHeight - 28 - 96; poster.Img != nil {
+				ui.Image(c, poster.Img).Height(ph).Width(ph*3/4).Shrink(0).Fit(ui.Cover).Radius(10).Opacity(poster.Fade).
 					Shadow(0, 18, 50, 0, rgba(0, 0, 0, 170))
 			}
 		})
@@ -257,6 +257,25 @@ func (a *app) posterRow(c *ui.Context, key, title string, f *feed, more func()) 
 	})
 }
 
+// posterFallback stands for a poster that has not loaded: the title over
+// a color of its own, as the poster's would be, so that a row of them is
+// not a grey wall.
+func posterFallback(c *ui.Context, title string, failed bool) {
+	var h uint32 = 2166136261
+	for _, b := range []byte(title) {
+		h = (h ^ uint32(b)) * 16777619
+	}
+	hue := float32(h % 360)
+	ui.Column(c).Absolute().Left(0).Top(0).Right(0).Bottom(0).Center().Padding(14).Gap(8).
+		LinearGradient(ui.LinearGradient{Angle: 160, From: hsl(hue, 0.35, 0.24), To: hsl(hue+40, 0.30, 0.12)}).
+		Children(func() {
+			ui.Text(c, title).FontSize(14).FontWeight(700).TextColor(withAlpha(colorWhite, 200)).TextAlign(ui.Center).MaxLines(4).LineHeight(1.35)
+			if failed {
+				ui.Icon(c, iconRefresh).Size(14, 14).TextColor(withAlpha(colorWhite, 110))
+			}
+		})
+}
+
 // moreCard ends a row with a card loading its next page.
 func (a *app) moreCard(c *ui.Context, key string, f *feed) {
 	b := ui.ButtonBase(c.Key("more-card")).Size(cardW, cardW*4/3).Shrink(0).Radius(6).Center().Column().Gap(8).Label("加载更多")
@@ -287,12 +306,12 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 	card.Children(func() {
 		ui.Box(c).Width(width).Height(width*4/3).Radius(6).Clip().Background(colorCard).
 			Shadow(0, 10*k, 28*k, 0, rgba(0, 0, 0, 160*k)).Children(func() {
-			if cv := a.coverOf(s.Cover); cv != nil && cv.img != nil {
-				ui.Image(c, cv.img).Fill().Fit(ui.Cover)
-			} else {
-				ui.Column(c).Fill().Center().Padding(12).Children(func() {
-					ui.Text(c, s.Title).FontSize(13).TextColor(colorFaint).TextAlign(ui.Center).MaxLines(3)
-				})
+			pic := a.images.Get(c, s.Cover, imgSmall, card.InView())
+			if pic.Img == nil || pic.Fade < 1 {
+				posterFallback(c, s.Title, pic.Failed)
+			}
+			if pic.Img != nil {
+				ui.Image(c, pic.Img).Absolute().Left(0).Top(0).Right(0).Bottom(0).Fit(ui.Cover).Opacity(pic.Fade)
 			}
 			// The episode count over the poster's corner.
 			if s.EpisodeLabel != "" && note == "" {
@@ -469,4 +488,28 @@ func abs32(f float32) float32 {
 		return -f
 	}
 	return f
+}
+
+// hsl is an opaque color of hue h in degrees, saturation s and lightness l.
+func hsl(h, s, l float32) ui.Color {
+	h = float32(math.Mod(float64(h), 360)) / 60
+	ch := (1 - abs32(2*l-1)) * s
+	x := ch * (1 - abs32(float32(math.Mod(float64(h), 2))-1))
+	var r, g, b float32
+	switch int(h) {
+	case 0:
+		r, g = ch, x
+	case 1:
+		r, g = x, ch
+	case 2:
+		g, b = ch, x
+	case 3:
+		g, b = x, ch
+	case 4:
+		r, b = x, ch
+	default:
+		r, b = ch, x
+	}
+	m := l - ch/2
+	return ui.RGBA(uint8((r+m)*255), uint8((g+m)*255), uint8((b+m)*255), 1)
 }

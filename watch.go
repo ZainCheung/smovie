@@ -21,7 +21,7 @@ func (a *app) watchPage(c *ui.Context) {
 		s = &a.detail.Series
 	}
 	w, h := c.Size()
-	cv := a.coverOf(s.Cover)
+	backdrop := a.images.Get(c, s.Cover, imgSmall, true)
 	ratio := a.aspect()
 	landscape := ratio >= 1
 
@@ -43,8 +43,8 @@ func (a *app) watchPage(c *ui.Context) {
 		// backdrop keeps them in a box of its own and the content follows
 		// it, pulled up over it.
 		ui.Box(c).Height(backdropH).Clip().Children(func() {
-			if cv != nil && cv.img != nil {
-				ui.Image(c, cv.img).Absolute().Left(-60).Top(-60).Size(w+120, backdropH+80).Fit(ui.Cover).Blur(48).Opacity(0.45)
+			if backdrop.Img != nil {
+				ui.Image(c, backdrop.Img).Absolute().Left(-60).Top(-60).Size(w+120, backdropH+80).Fit(ui.Cover).Blur(48).Opacity(0.45 * backdrop.Fade)
 			}
 			ui.Box(c).Absolute().Left(0).Top(0).Size(w, backdropH).LinearGradient(ui.LinearGradient{
 				Angle: 180, From: withAlpha(colorBG, 60), To: colorBG})
@@ -197,8 +197,8 @@ func (a *app) playerOverlay(c *ui.Context) {
 	white := rgba(255, 255, 255, 235)
 	ui.Box(c).Absolute().Left(0).Right(0).Top(0).Bottom(0).Radius(10).Clip().Background(rgba(0, 0, 0, 255)).Children(func() {
 		if a.series != nil {
-			if cv := a.coverOf(a.series.Cover); cv != nil && cv.img != nil {
-				ui.Image(c, cv.img).Fill().Fit(ui.Cover).Blur(24).Opacity(0.35)
+			if pic := a.images.Get(c, a.series.Cover, imgSmall, true); pic.Img != nil {
+				ui.Image(c, pic.Img).Fill().Fit(ui.Cover).Blur(24).Opacity(0.35)
 			}
 		}
 		ui.Column(c).Absolute().Left(0).Right(0).Top(0).Bottom(0).Center().Gap(12).Padding(28).Children(func() {
