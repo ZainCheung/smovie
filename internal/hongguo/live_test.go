@@ -95,3 +95,32 @@ func TestLiveDanmaku(t *testing.T) {
 	}
 	t.Logf("danmaku: %d, first %.1fs %q, last %.1fs", len(d), d[0].Time, d[0].Text, d[len(d)-1].Time)
 }
+
+// go test -run LiveSeasons ./internal/hongguo -v  (with SMOVIE_LIVE=1)
+func TestLiveSeasons(t *testing.T) {
+	if os.Getenv("SMOVIE_LIVE") == "" {
+		t.Skip("set SMOVIE_LIVE=1 to hit the network")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	for _, id := range []string{"7701935931787316286", os.Getenv("SMOVIE_SERIES")} {
+		if id == "" {
+			continue
+		}
+		d, err := Episodes(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s album=%q", d.Title, d.AlbumID)
+		if d.AlbumID == "" {
+			continue
+		}
+		seasons, err := Seasons(ctx, d.Series, d.AlbumID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range seasons {
+			t.Logf("  第%d季 %s %s %s %s", s.Index, s.ID, s.Title, s.EpisodeLabel, s.Heat)
+		}
+	}
+}

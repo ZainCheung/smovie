@@ -46,6 +46,11 @@ func join(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 // The signed bytes must be exactly the bytes sent in the URL and POST body.
 // Search ticket values until Medusa uses the supported branch, as upstream does.
 func playbackRequest(ctx context.Context, payload []byte, dev *device, now time.Time) (*http.Request, error) {
+	return signedRequest(ctx, videoAPI, payload, dev, now)
+}
+
+// signedRequest is a POST of payload to an app API, signed as playback's.
+func signedRequest(ctx context.Context, api string, payload []byte, dev *device, now time.Time) (*http.Request, error) {
 	q := url.Values{}
 	for k, v := range deviceQuery {
 		q.Set(k, v)
@@ -64,7 +69,7 @@ func playbackRequest(ctx context.Context, payload []byte, dev *device, now time.
 		if signingBranch(queryHash, bodyHash[:], ts) != 0 {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, videoAPI+"?"+query, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, api+"?"+query, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}

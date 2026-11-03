@@ -91,7 +91,12 @@ type app struct {
 	infos     map[string]*loaded[hongguo.SeriesInfo]
 	epInfos   map[string]*loaded[hongguo.EpisodeInfo]
 	seriesTab bool
-	descOpen  bool
+	// The seasons of collections, by album; those the user follows; and
+	// whether the episode panel shows the seasons rather than episodes.
+	seasons      map[string]*loaded[[]hongguo.Season]
+	albums       []followed
+	panelSeasons bool
+	descOpen     bool
 
 	// The player fills the screen (hostFullScreen); the window was not in
 	// full screen before, so it leaves it after.
@@ -111,6 +116,8 @@ func newApp() *app {
 		theme:        netflixTheme(),
 		history:      loadHistory(),
 		myList:       loadMyList(),
+		albums:       loadAlbums(),
+		seasons:      map[string]*loaded[[]hongguo.Season]{},
 		episodeCache: map[string]*hongguo.Detail{},
 		infos:        map[string]*loaded[hongguo.SeriesInfo]{},
 		epInfos:      map[string]*loaded[hongguo.EpisodeInfo]{},
@@ -298,7 +305,7 @@ func (a *app) openAt(s hongguo.Series, ep int) {
 	}
 	a.series = &s
 	a.detail, a.detailErr = nil, ""
-	a.seriesTab, a.descOpen = false, false
+	a.seriesTab, a.descOpen, a.panelSeasons = false, false, false
 	a.current, a.job = -1, nil
 	a.epRange = start / epBlock
 	a.tellPlayer("smovie.pause", nil)

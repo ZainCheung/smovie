@@ -225,16 +225,50 @@ func (a *app) description(c *ui.Context, s hongguo.Series) {
 // the video.
 func (a *app) episodePanel(c *ui.Context, s hongguo.Series, width float32) {
 	ui.Column(c.Key("episodes")).Width(width).Radius(12).Clip().Border(1, rgba(255, 255, 255, 34)).Children(func() {
+		album, seasons := a.albumOf()
+		showSeasons := a.panelSeasons && album != ""
 		ui.Row(c).Padding(12, 16).Gap(12).AlignItems(ui.Center).Background(rgba(255, 255, 255, 16)).Children(func() {
 			ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-				ui.Text(c, "选集").FontSize(16).FontWeight(700)
-				if a.detail != nil && a.current >= 0 {
+				if album == "" {
+					ui.Text(c, "选集").FontSize(16).FontWeight(700)
+				} else {
+					ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
+						for _, t := range []struct {
+							on    bool
+							label string
+						}{{false, "选集"}, {true, "系列剧"}} {
+							tab := ui.ButtonBase(c.Key("tab" + t.label)).Label(t.label)
+							active := t.on == showSeasons
+							tab.Children(func() {
+								ui.Text(c, t.label).FontSize(16).FontWeight(700).
+									TextColor(map[bool]ui.Color{true: colorWhite, false: withAlpha(colorWhite, uint8(110+60*b2f(tab.Hovered())))}[active])
+							})
+							if tab.Clicked() {
+								a.panelSeasons = t.on
+							}
+						}
+					})
+				}
+				switch {
+				case showSeasons && seasons.value != nil:
+					ui.Textf(c, "共 %d 季", len(*seasons.value)).FontSize(12).TextColor(colorMuted)
+				case !showSeasons && a.detail != nil && a.current >= 0:
 					ui.Textf(c, "正在播放第 %d 集 · 共 %d 集", a.current+1, len(a.detail.VIDs)).FontSize(12).TextColor(colorMuted)
 				}
 			})
+			if showSeasons {
+				if seasons.value != nil {
+					a.followPill(c, album, *seasons.value)
+				}
+				return
+			}
 			ui.Text(c, "自动连播").FontSize(12).TextColor(colorMuted)
 			ui.Switch(c.Key("auto"), &a.autoNext).Label("自动连播")
 		})
+		if showSeasons {
+			a.seasonsPanel(c, seasons, width)
+			return
+		}
 		ui.Column(c).Padding(12).Gap(10).Children(func() {
 			if a.detail == nil {
 				if a.detailErr != "" {

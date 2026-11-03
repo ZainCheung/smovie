@@ -298,6 +298,8 @@ type cardExtra struct {
 	progress float32 // of the series watched, a bar along the poster's foot
 	remove   func()  // a button taking it out of the row, under the pointer
 	open     func()  // what a click does instead of playing it
+	// removeLabel names the remove button: "从继续观看中移除" when unset.
+	removeLabel string
 }
 
 // posterCard is a poster that grows under the pointer, with its title
@@ -343,8 +345,12 @@ func (a *app) posterCard(c *ui.Context, s hongguo.Series, width float32, note st
 					})
 				})
 				if extra != nil && extra.remove != nil {
+					tip := extra.removeLabel
+					if tip == "" {
+						tip = "从继续观看中移除"
+					}
 					x := ui.ButtonBase(c.Key("remove")).Absolute().Top(6).Right(6).Size(26, 26).Radius(13).Center().
-						Label("从继续观看中移除").Tooltip("从继续观看中移除")
+						Label(tip).Tooltip(tip)
 					x.Background(rgba(0, 0, 0, 150+80*b2f(x.Hovered()))).Border(1, withAlpha(colorWhite, 160))
 					x.Children(func() { ui.Icon(c, iconClose).Size(14, 14).TextColor(colorWhite) })
 					if x.Clicked() {

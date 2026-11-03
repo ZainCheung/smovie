@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -120,6 +121,12 @@ func (a *app) myListPage(c *ui.Context) {
 				ui.Textf(c, "共 %d 部", n).FontSize(13).TextColor(colorFaint)
 			}
 		})
+		w, _ := c.Size()
+		cols := max(2, int((w-2*pagePad+14)/(cardW+14)))
+		a.albumRow(c, float32(math.Floor(float64((w-2*pagePad-14*float32(cols-1))/float32(cols))))-0.5)
+		if len(a.myList) == 0 && len(a.albums) > 0 {
+			return
+		}
 		if len(a.myList) == 0 {
 			ui.Column(c).Padding(100, 0).Center().Gap(14).Children(func() {
 				ui.Icon(c, iconPlus).Size(44, 44).TextColor(colorFaint)

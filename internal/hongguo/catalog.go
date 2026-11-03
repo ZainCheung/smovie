@@ -250,6 +250,8 @@ func Search(ctx context.Context, keyword string, page int) (*Page, error) {
 type Detail struct {
 	Series
 	VIDs []string
+	// AlbumID is the collection the series is a season of, when it is.
+	AlbumID string
 }
 
 // Episodes loads a series' episode list from its public player page.
@@ -290,7 +292,10 @@ func episodesFrom(ctx context.Context, u, seriesID string) (*Detail, error) {
 		var data struct {
 			SeriesDetail struct {
 				rawSeries
-				VIDList []json.RawMessage `json:"vid_list"`
+				VIDList    []json.RawMessage `json:"vid_list"`
+				SeasonInfo struct {
+					GroupID flexString `json:"series_group_id"`
+				} `json:"season_info"`
 			} `json:"seriesDetail"`
 		}
 		if json.Unmarshal(raw, &data) != nil {
@@ -300,7 +305,10 @@ func episodesFrom(ctx context.Context, u, seriesID string) (*Detail, error) {
 		if sd.SeriesID != seriesID || len(sd.VIDList) == 0 {
 			continue
 		}
-		d := &Detail{Series: sd.series()}
+		d := &Detail{Series: sd.series(), AlbumID: string(sd.SeasonInfo.GroupID)}
+		if !seriesIDPattern.MatchString(d.AlbumID) {
+			d.AlbumID = ""
+		}
 		for _, v := range sd.VIDList {
 			vid := strings.Trim(string(v), `"`)
 			if !vidPattern.MatchString(vid) {
