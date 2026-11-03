@@ -82,6 +82,83 @@ func seasonOf(ctx context.Context, seriesID string) (albumID string, s Season, e
 	return albumID, s, nil
 }
 
+// seasonFromSite reads which collection a series is a season of from its
+// public page, as fast as a page loads and without the app's signature:
+// the page tells the collection but not the season, which seasonIndex
+// reads from the title.
+func seasonFromSite(ctx context.Context, seriesID string) (albumID string, s Season, err error) {
+	html, err := get(ctx, SiteOrigin+"/detail?series_id="+seriesID, "text/html")
+	if err != nil {
+		return "", s, err
+	}
+	var router struct {
+		LoaderData struct {
+			Page *struct {
+				SeriesDetail struct {
+					rawSeries
+					SeasonInfo struct {
+						GroupID flexString `json:"series_group_id"`
+					} `json:"season_info"`
+				} `json:"seriesDetail"`
+				Social struct {
+					Heat struct{ Text string } `json:"hot_score_data"`
+				} `json:"seriesSocialInfo"`
+			} `json:"detail_page"`
+		} `json:"loaderData"`
+	}
+	if err := readRouterData(html, &router); err != nil {
+		return "", s, err
+	}
+	p := router.LoaderData.Page
+	if p == nil || p.SeriesDetail.SeriesID != seriesID {
+		return "", s, errors.New("页面未找到剧集信息")
+	}
+	s = Season{Series: p.SeriesDetail.series(), Index: seasonIndex(p.SeriesDetail.series().Title),
+		Heat: strings.TrimSpace(p.Social.Heat.Text)}
+	if g := string(p.SeriesDetail.SeasonInfo.GroupID); seriesIDPattern.MatchString(g) {
+		albumID = g
+	}
+	return albumID, s, nil
+}
+
+// seasonIndex is the season a title tells, 1 when it tells none.
+func seasonIndex(title string) int {
+	m := seasonMark.FindStringSubmatch(title)
+	if m == nil {
+		return 1
+	}
+	if n, err := strconv.Atoi(m[1]); err == nil {
+		return n
+	}
+	return chineseNumber(m[1])
+}
+
+// chineseNumber reads 一 to 九十九 (and 两); 0 for what it cannot.
+func chineseNumber(s string) int {
+	digit := func(r rune) int {
+		for i, d := range []rune("零一二三四五六七八九") {
+			if d == r {
+				return i
+			}
+		}
+		return -1
+	}
+	rs := []rune(strings.ReplaceAll(s, "两", "二"))
+	switch {
+	case len(rs) == 1 && rs[0] == '十':
+		return 10
+	case len(rs) == 1:
+		return max(digit(rs[0]), 0)
+	case len(rs) == 2 && rs[0] == '十':
+		return 10 + max(digit(rs[1]), 0)
+	case len(rs) == 2 && rs[1] == '十':
+		return max(digit(rs[0]), 0) * 10
+	case len(rs) == 3 && rs[1] == '十':
+		return max(digit(rs[0]), 0)*10 + max(digit(rs[2]), 0)
+	}
+	return 0
+}
+
 // seasonSuffix is what tells a season in a title: 第二季, 第5部, 2.
 var seasonSuffix = regexp.MustCompile(`\s*(?:[（(]?第\s*[0-9一二三四五六七八九十百两]+\s*[季部][）)]?|[：:]\s*[^：:]{1,8}篇|\s+\d{1,2})\s*$`)
 
@@ -143,6 +220,12 @@ func seasonStyle(titles []string) (unit string, digits bool) {
 // searches for each season missing between those found, and the one after
 // the last, by its title. Seasons not yet out are not found.
 func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
+	return SeasonsProgress(ctx, s, albumID, nil)
+}
+
+// SeasonsProgress is Seasons, telling progress the seasons found so far,
+// in order, each time it finds more.
+func SeasonsProgress(ctx context.Context, s Series, albumID string, progress func([]Season)) ([]Season, error) {
 	if !seriesIDPattern.MatchString(albumID) {
 		return nil, errors.New("合集编号无效")
 	}
@@ -162,7 +245,7 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 	// seasons of the collection.
 	verify := func(cands []Series) {
 		var wg sync.WaitGroup
-		sem := make(chan struct{}, 4)
+		sem := make(chan struct{}, 8)
 		for _, c := range cands {
 			mu.Lock()
 			skip := tried[c.ID]
@@ -176,7 +259,10 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				album, se, err := seasonOf(ctx, c.ID)
+				album, se, err := seasonFromSite(ctx, c.ID)
+				if err != nil {
+					album, se, err = seasonOf(ctx, c.ID)
+				}
 				mu.Lock()
 				defer mu.Unlock()
 				if c.ID == s.ID && err != nil {
@@ -192,6 +278,9 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 				}
 				if se.Title != "" {
 					c.Title = se.Title
+				}
+				if c.Cover == "" {
+					c.Cover = se.Cover
 				}
 				se.Series = c
 				if se.Index <= 0 {
@@ -226,45 +315,65 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 		return out, nil
 	}
 
+	// sorted is the seasons found, in order; with found's lock held.
+	sorted := func() []Season {
+		out := make([]Season, 0, len(found))
+		for _, se := range found {
+			out = append(out, se)
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].Index != out[j].Index {
+				return out[i].Index < out[j].Index
+			}
+			return out[i].ID < out[j].ID
+		})
+		return out
+	}
+	told := 0
+	tell := func() {
+		if progress == nil {
+			return
+		}
+		mu.Lock()
+		n, list := len(found), sorted()
+		mu.Unlock()
+		if n > told {
+			told = n
+			progress(list)
+		}
+	}
+
 	first, err := search(base, 2)
 	if err != nil {
 		return nil, err
 	}
-	verify(append([]Series{s}, first...))
-	if len(found) == 0 && mine != nil {
-		return nil, mine
-	}
-
-	// The seasons missing, and the one after the last, by their titles,
-	// until a round finds none.
+	// gapQueries are the searches for the seasons missing among those
+	// indexes, and the one after the last, each asked once.
 	asked := map[int]bool{}
-	for round := 0; round < 4 && ctx.Err() == nil; round++ {
-		mu.Lock()
+	gapQueries := func(indexes []int, titles []string) []string {
 		have, last := map[int]bool{}, 0
-		for _, se := range found {
-			have[se.Index] = true
-			last = max(last, se.Index)
+		for _, n := range indexes {
+			have[n] = true
+			last = max(last, n)
 		}
 		unit, digits := seasonStyle(titles)
-		mu.Unlock()
-		var queries []string
-		for n := 1; n <= last+1 && len(queries) < 40; n++ {
+		var qs []string
+		for n := 1; n <= last+1 && len(qs) < 40; n++ {
 			if !have[n] && !asked[n] {
 				asked[n] = true
-				queries = append(queries, base+"第"+seasonNumeral(n, digits)+unit)
+				qs = append(qs, base+"第"+seasonNumeral(n, digits)+unit)
 			}
 		}
-		if len(queries) == 0 {
-			break
-		}
-		before := len(found)
+		return qs
+	}
+	searchAll := func(qs []string) []Series {
 		var (
 			wg    sync.WaitGroup
 			cmu   sync.Mutex
 			cands []Series
-			sem   = make(chan struct{}, 4)
+			sem   = make(chan struct{}, 8)
 		)
-		for _, q := range queries {
+		for _, q := range qs {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -278,21 +387,79 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 			}()
 		}
 		wg.Wait()
-		verify(cands)
+		return cands
+	}
+
+	// While the first results are checked, already search for the seasons
+	// their titles leave out.
+	cands := append([]Series{s}, first...)
+	var idx []string
+	var guess []int
+	for _, c := range cands {
+		idx = append(idx, c.Title)
+		guess = append(guess, seasonIndex(c.Title))
+	}
+	var more []Series
+	var wg0 sync.WaitGroup
+	wg0.Add(1)
+	go func() { defer wg0.Done(); more = searchAll(gapQueries(guess, idx)) }()
+	verify(cands)
+	tell()
+	wg0.Wait()
+	if len(found) == 0 && mine != nil {
+		return nil, mine
+	}
+	verify(more)
+	tell()
+
+	// Then those still missing among the seasons found, until a round
+	// finds none.
+	for round := 0; round < 4 && ctx.Err() == nil; round++ {
+		mu.Lock()
+		var have []int
+		for _, se := range found {
+			have = append(have, se.Index)
+		}
+		qs := gapQueries(have, titles)
+		mu.Unlock()
+		if len(qs) == 0 {
+			break
+		}
+		before := len(found)
+		verify(searchAll(qs))
+		tell()
 		if len(found) == before {
 			break
 		}
 	}
 
-	out := make([]Season, 0, len(found))
-	for _, se := range found {
-		out = append(out, se)
+	// Titles that tell the same season, as two that tell none: ask the
+	// app, which knows each one's.
+	byIndex := map[int][]string{}
+	for id, se := range found {
+		byIndex[se.Index] = append(byIndex[se.Index], id)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Index != out[j].Index {
-			return out[i].Index < out[j].Index
+	var wg sync.WaitGroup
+	for _, ids := range byIndex {
+		if len(ids) < 2 {
+			continue
 		}
-		return out[i].ID < out[j].ID
-	})
-	return out, nil
+		for _, id := range ids {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, se, err := seasonOf(ctx, id); err == nil && se.Index > 0 {
+					mu.Lock()
+					f := found[id]
+					f.Index = se.Index
+					found[id] = f
+					mu.Unlock()
+				}
+			}()
+		}
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	return sorted(), nil
 }

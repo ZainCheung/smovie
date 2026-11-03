@@ -33,3 +33,16 @@ func TestFollowedAlbumInMyList(t *testing.T) {
 		}
 	}
 }
+
+// The seasons found show from the disk at once, on the next launch.
+func TestSeasonCache(t *testing.T) {
+	configOverride = t.TempDir()
+	a := newApp()
+	v := []hongguo.Season{{Series: hongguo.Series{ID: "3000001", Title: "合集剧"}, Index: 1}, {Series: hongguo.Series{ID: "3000002", Title: "合集剧第二季"}, Index: 2}}
+	a.cacheSeasons("9000001", v)
+	time.Sleep(100 * time.Millisecond)
+	b := newApp()
+	if got := b.seasonCache()["9000001"]; len(got) != 2 || got[1].ID != "3000002" {
+		t.Fatalf("cached %+v", got)
+	}
+}

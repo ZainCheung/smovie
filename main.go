@@ -94,6 +94,7 @@ type app struct {
 	// The seasons of collections, by album; those the user follows; and
 	// whether the episode panel shows the seasons rather than episodes.
 	seasons      map[string]*loaded[[]hongguo.Season]
+	seasonDisk   map[string][]hongguo.Season // the seasons found before, on disk
 	albums       []followed
 	panelSeasons bool
 	descOpen     bool

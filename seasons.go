@@ -19,11 +19,15 @@ import (
 // seasons, and tells when a new one comes out.
 
 // seasonsOf returns the seasons of album, of which seed is one, starting
-// to load them.
+// to load them: those found before show at once, from the disk, while
+// they are looked for again, once a launch.
 func (a *app) seasonsOf(album string, seed hongguo.Series) *loaded[[]hongguo.Season] {
 	l, ok := a.seasons[album]
 	if !ok {
 		l = &loaded[[]hongguo.Season]{}
+		if v, ok := a.seasonCache()[album]; ok && len(v) > 0 {
+			l.value = &v
+		}
 		a.seasons[album] = l
 		a.loadSeasons(album, seed, l)
 	}
@@ -32,17 +36,90 @@ func (a *app) seasonsOf(album string, seed hongguo.Series) *loaded[[]hongguo.Sea
 
 func (a *app) loadSeasons(album string, seed hongguo.Series, l *loaded[[]hongguo.Season]) {
 	l.loading, l.err = true, nil
+	// A partial or failed look leaves a longer list known before.
+	known := 0
+	if l.value != nil {
+		known = len(*l.value)
+	}
+	show := func(v []hongguo.Season) {
+		if len(v) >= known {
+			l.value = &v
+		}
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		v, err := hongguo.Seasons(ctx, seed, album)
+		v, err := hongguo.SeasonsProgress(ctx, seed, album, func(part []hongguo.Season) {
+			a.win.Update(func() { show(part) })
+		})
 		a.win.Update(func() {
-			l.loading, l.err = false, err
-			if err == nil {
-				l.value = &v
+			l.loading = false
+			if err != nil {
+				if l.value == nil {
+					l.err = err
+				}
+				return
+			}
+			show(v)
+			if len(v) >= known {
+				a.cacheSeasons(album, v)
 				a.seasonsLoaded(album, v)
 			}
 		})
+	}()
+}
+
+// --- the seasons found, kept on disk ---
+
+func seasonCachePath() string { return filepath.Join(configDir(), "seasons.json") }
+
+// seasonCache is the seasons of the collections looked at before, by
+// album, read from the disk once.
+func (a *app) seasonCache() map[string][]hongguo.Season {
+	if a.seasonDisk == nil {
+		a.seasonDisk = map[string][]hongguo.Season{}
+		if data, err := os.ReadFile(seasonCachePath()); err == nil {
+			_ = json.Unmarshal(data, &a.seasonDisk)
+		}
+	}
+	return a.seasonDisk
+}
+
+var (
+	seasonCacheMu  sync.Mutex
+	seasonCacheGen int
+)
+
+const seasonCacheMax = 200 // collections
+
+func (a *app) cacheSeasons(album string, v []hongguo.Season) {
+	m := a.seasonCache()
+	if len(m) >= seasonCacheMax {
+		for k := range m { // any: the cache only saves time
+			delete(m, k)
+			break
+		}
+	}
+	m[album] = v
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	seasonCacheMu.Lock()
+	seasonCacheGen++
+	gen := seasonCacheGen
+	seasonCacheMu.Unlock()
+	go func() {
+		seasonCacheMu.Lock()
+		defer seasonCacheMu.Unlock()
+		if gen != seasonCacheGen {
+			return // a newer write follows
+		}
+		p := seasonCachePath()
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if os.WriteFile(p+".tmp", data, 0o644) == nil {
+			_ = os.Rename(p+".tmp", p)
+		}
 	}()
 }
 

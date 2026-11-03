@@ -42,3 +42,19 @@ func TestSeasonNumeral(t *testing.T) {
 		}
 	}
 }
+
+func TestSeasonIndex(t *testing.T) {
+	for title, want := range map[string]int{
+		"符仙人：符道之祖": 1, "符仙人：符道之祖第三季": 3, "符仙人：符道之祖第十季": 10, "符仙人：符道之祖第十三季": 13,
+		"十八岁太奶奶驾到，重整家族荣耀第五部": 5, "凡尘问道（第13季）": 13, "某剧第二十一季": 21, "某剧第两部": 2, "某剧第四十季": 40,
+	} {
+		if got := seasonIndex(title); got != want {
+			t.Errorf("seasonIndex(%q) = %d, want %d", title, got, want)
+		}
+	}
+	for n := 1; n <= 99; n++ {
+		if got := chineseNumber(seasonNumeral(n, false)); got != n {
+			t.Errorf("chineseNumber(seasonNumeral(%d)) = %d", n, got)
+		}
+	}
+}
