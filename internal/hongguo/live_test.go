@@ -78,3 +78,20 @@ func TestLiveSocial(t *testing.T) {
 		t.Fatalf("episode 41: %v, want ErrLocked", err)
 	}
 }
+
+// go test -run LiveDanmaku ./internal/hongguo -v  (with SMOVIE_LIVE=1)
+func TestLiveDanmaku(t *testing.T) {
+	if os.Getenv("SMOVIE_LIVE") == "" {
+		t.Skip("set SMOVIE_LIVE=1 to hit the network")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	d, err := FetchDanmaku(ctx, "7701935931787316286", "7701937936731737112")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d) == 0 {
+		t.Fatal("no danmaku")
+	}
+	t.Logf("danmaku: %d, first %.1fs %q, last %.1fs", len(d), d[0].Time, d[0].Text, d[len(d)-1].Time)
+}

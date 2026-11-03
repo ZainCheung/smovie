@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"smovie/internal/hongguo"
 )
 
 var (
@@ -21,13 +23,15 @@ var (
 
 // episodeInfo is the episode the player page shows.
 type episodeInfo struct {
-	VID    string  `json:"vid"`
-	Key    string  `json:"key"` // of its media, of the quality chosen
-	Ep     int     `json:"ep"`
-	Total  int     `json:"total"`
-	Title  string  `json:"title"`
-	Poster string  `json:"poster"`
-	Start  float64 `json:"start,omitempty"` // seconds to pick up at
+	VID string `json:"vid"`
+	Key string `json:"key"` // of its media, of the quality chosen
+	// SeriesID is the series', which the danmaku API asks for.
+	SeriesID string  `json:"seriesId"`
+	Ep       int     `json:"ep"`
+	Total    int     `json:"total"`
+	Title    string  `json:"title"`
+	Poster   string  `json:"poster"`
+	Start    float64 `json:"start,omitempty"` // seconds to pick up at
 }
 
 // playerEvents is what the player page tells the app.
@@ -58,6 +62,61 @@ type mediaServer struct {
 
 	mu      sync.Mutex
 	current episodeInfo
+	danmaku map[string]*danmakuEntry // by vid
+}
+
+// danmakuEntry is an episode's danmaku, loaded once and kept a while.
+type danmakuEntry struct {
+	done  chan struct{}
+	at    time.Time
+	items []hongguo.Danmaku
+	err   error
+}
+
+// fetchDanmaku is hongguo.FetchDanmaku; tests stand in for it.
+var fetchDanmaku = hongguo.FetchDanmaku
+
+const (
+	danmakuKeep     = 10 * time.Minute
+	danmakuKeepFail = 15 * time.Second
+	danmakuKept     = 32 // episodes
+)
+
+// episodeDanmaku loads vid's danmaku, sharing one load between the
+// requests that ask at once.
+func (s *mediaServer) episodeDanmaku(seriesID, vid string) ([]hongguo.Danmaku, error) {
+	s.mu.Lock()
+	e := s.danmaku[vid]
+	if e != nil {
+		select {
+		case <-e.done:
+			keep := danmakuKeep
+			if e.err != nil {
+				keep = danmakuKeepFail
+			}
+			if time.Since(e.at) > keep {
+				e = nil
+			}
+		default:
+		}
+	}
+	if e == nil {
+		e = &danmakuEntry{done: make(chan struct{})}
+		if s.danmaku == nil || len(s.danmaku) >= danmakuKept {
+			s.danmaku = map[string]*danmakuEntry{}
+		}
+		s.danmaku[vid] = e
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			e.items, e.err = fetchDanmaku(ctx, seriesID, vid)
+			e.at = time.Now()
+			close(e.done)
+		}()
+	}
+	s.mu.Unlock()
+	<-e.done
+	return e.items, e.err
 }
 
 func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
@@ -93,6 +152,26 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 			return
 		}
 		writeJSON(w, s.lib.status(key))
+	})
+	mux.HandleFunc("GET /danmaku", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		sid, vid := q.Get("s"), q.Get("v")
+		if !vidPattern.MatchString(sid) || !vidPattern.MatchString(vid) {
+			http.NotFound(w, r)
+			return
+		}
+		items, err := s.episodeDanmaku(sid, vid)
+		res := struct {
+			Items []hongguo.Danmaku `json:"items"`
+			Error string            `json:"error,omitempty"`
+		}{Items: items}
+		if res.Items == nil {
+			res.Items = []hongguo.Danmaku{}
+		}
+		if err != nil {
+			res.Error = err.Error()
+		}
+		writeJSON(w, res)
 	})
 	mux.HandleFunc("GET /qualities", func(w http.ResponseWriter, r *http.Request) {
 		vid := r.URL.Query().Get("v")
@@ -355,6 +434,12 @@ body.active .side{opacity:1;pointer-events:auto}
 #hold.show{opacity:1}
 #hold i{font-style:normal;letter-spacing:-3px;animation:pulse .8s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
+/* --- danmaku: comments floating right to left over the top of the picture --- */
+#dm{position:fixed;left:0;right:0;top:0;height:46%;overflow:hidden;pointer-events:none;contain:strict}
+body.nodm #dm{display:none}
+#dm span{position:absolute;left:0;top:0;white-space:nowrap;font-weight:700;line-height:1;will-change:transform;
+  text-shadow:0 0 1px #000,0 0 1px #000,0 1px 2px rgba(0,0,0,.8);opacity:.92}
+.dm-off,body.nodm .dm-on{display:none} body.nodm .dm-off{display:block}
 #toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 16px;border-radius:10px;background:rgba(0,0,0,.75);
   font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
@@ -439,6 +524,7 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
 <video id="v" controls playsinline preload="auto"></video>
 <button class="side" id="prev" title="上一集 (Shift+←)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg><span>上一集</span></button>
 <button class="side" id="next" title="下一集 (Shift+→)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg><span>下一集</span></button>
+<div id="dm"></div>
 <div class="center" id="loading" hidden>
   <div class="spinner"></div><h2 id="ltitle"></h2><p id="lsub"></p><div class="progress" id="lprog"><div></div></div>
 </div>
@@ -464,6 +550,7 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
   <div class="grp" id="br">
     <div id="vol"><button class="cb" id="mute" title="静音 (M)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-on"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-off"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="m16 9 6 6M22 9l-6 6"/></svg></button>
       <div class="track" id="volbar"><div class="rail"></div><div class="fill"></div><div class="knob"></div></div></div>
+    <button class="cb" id="dmb" title="弹幕 (D)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="dm-on"><rect x="2.5" y="4.5" width="19" height="15" rx="3"/><path d="M6.5 9.5h6M9 13.5h8.5M6.5 13.5h.01M15.5 9.5h2"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="dm-off"><rect x="2.5" y="4.5" width="19" height="15" rx="3" opacity=".55"/><path d="M6.5 9.5h6M9 13.5h8.5" opacity=".55"/><path d="m4 3 16 18"/></svg></button>
     <div class="wrap" id="qwrap"><button class="cb txt" id="q" title="清晰度">清晰度</button><div class="menu" id="qmenu"></div></div>
     <div class="wrap"><button class="cb" id="spd" title="倍速 ([ / ])">1x</button><div class="menu" id="spdmenu"></div></div>
     <button class="cb opt" id="pip" title="画中画"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg></button>
@@ -517,7 +604,7 @@ function load(info) {
   if (!info || !info.vid) return;
   info.key = info.key || info.vid;
   if (cur && cur.key === info.key && v.getAttribute('src')) { cur = info; refreshNav(); return; }
-  if (!cur || cur.vid !== info.vid) { quals = []; switching = null; }
+  if (!cur || cur.vid !== info.vid) { quals = []; switching = null; dmLoad(info); }
   cur = info; sent = false; const my = ++token;
   v.pause(); v.removeAttribute('src'); v.load();
   $('ltitle').textContent = '第 ' + info.ep + ' 集';
@@ -585,6 +672,90 @@ function fsChanged() {
 }
 document.addEventListener('fullscreenchange', fsChanged);
 document.addEventListener('webkitfullscreenchange', fsChanged);
+
+// --- danmaku ---
+// The episode's comments, by time, each floating once as the video passes
+// it: in lanes over the top of the picture, a comment taking a lane only
+// once the one before it has wholly come in and will be gone before it
+// can be caught up; with no lane free it is left out. They move with the
+// video: paused, at its speed, and from where it seeks to.
+const DM_SECONDS = 8; // of video, to cross the picture
+const dm = { items: [], next: 0, on: store.get('danmaku', true), token: 0, live: new Set(), lanes: [], recent: new Map() };
+const dmLayer = $('dm');
+function dmClear() { for (const a of dm.live) a.cancel(); dm.live.clear(); dmLayer.textContent = ''; dm.lanes = []; dm.recent.clear(); }
+function dmSeek() {
+  dmClear();
+  const t = v.currentTime;
+  let lo = 0, hi = dm.items.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (dm.items[mid].time < t) lo = mid + 1; else hi = mid; }
+  dm.next = lo;
+}
+async function dmLoad(info) {
+  const my = ++dm.token;
+  dm.items = []; dmSeek();
+  if (!info.seriesId) return;
+  try {
+    const r = await (await fetch('/danmaku?s=' + info.seriesId + '&v=' + info.vid)).json();
+    if (my !== dm.token) return;
+    dm.items = r.items || []; dmSeek();
+    $('dmb').title = r.error && !dm.items.length ? '弹幕暂不可用 (D)' : '弹幕 (D)';
+  } catch (_) {}
+}
+function dmSize() { const h = innerHeight; return Math.round(Math.max(14, Math.min(26, h / 26))); }
+function dmShoot(item) {
+  // The API repeats a comment at nearly the same time: show it once.
+  const seen = dm.recent.get(item.text);
+  if (seen !== undefined && Math.abs(item.time - seen) < 3) return;
+  dm.recent.set(item.text, item.time);
+  if (dm.recent.size > 300) dm.recent.clear();
+  const size = dmSize(), laneH = Math.round(size * 1.45), W = dmLayer.clientWidth;
+  const lanes = Math.max(1, Math.floor(dmLayer.clientHeight / laneH));
+  if (dm.live.size >= 80) return;
+  const el = document.createElement('span');
+  el.textContent = item.text; el.style.fontSize = size + 'px'; el.style.color = item.color || '#fff';
+  dmLayer.appendChild(el);
+  const w = el.offsetWidth, now = v.currentTime, speed = (W + w) / DM_SECONDS;
+  let lane = -1;
+  for (let i = 0; i < lanes; i++) {
+    const p = dm.lanes[i];
+    // The one before has wholly come in, and leaves before this reaches the left.
+    if (!p || (now >= p.t + p.w / p.speed && now + W / speed >= p.t + (W + p.w) / p.speed)) { lane = i; break; }
+  }
+  if (lane < 0) { el.remove(); return; }
+  dm.lanes[lane] = { t: now, w, speed };
+  el.style.top = (lane * laneH + 6) + 'px';
+  const a = el.animate([{ transform: 'translateX(' + W + 'px)' }, { transform: 'translateX(' + (-w) + 'px)' }],
+    { duration: DM_SECONDS * 1000, easing: 'linear' });
+  a.playbackRate = v.playbackRate;
+  if (v.paused) a.pause();
+  dm.live.add(a);
+  a.onfinish = a.oncancel = () => { dm.live.delete(a); el.remove(); };
+}
+function dmTick() {
+  requestAnimationFrame(dmTick);
+  if (!dm.on || v.paused || v.seeking || !dm.items.length) return;
+  const t = v.currentTime;
+  // Those just passed; those left far behind, as after a stall, are skipped.
+  while (dm.next < dm.items.length && dm.items[dm.next].time <= t) {
+    const it = dm.items[dm.next++];
+    if (t - it.time < 1) dmShoot(it);
+  }
+}
+requestAnimationFrame(dmTick);
+v.addEventListener('seeking', dmSeek);
+v.addEventListener('emptied', dmClear);
+v.addEventListener('pause', () => { for (const a of dm.live) a.pause(); });
+v.addEventListener('play', () => { for (const a of dm.live) a.play(); });
+v.addEventListener('ratechange', () => { for (const a of dm.live) a.playbackRate = v.playbackRate; });
+addEventListener('resize', dmSeek);
+function dmToggle() {
+  dm.on = !dm.on; store.set('danmaku', dm.on);
+  document.body.classList.toggle('nodm', !dm.on);
+  if (!dm.on) dmClear(); else dmSeek();
+  toast(dm.on ? '弹幕已开启' : '弹幕已关闭');
+}
+document.body.classList.toggle('nodm', !dm.on);
+$('dmb').onclick = dmToggle;
 
 window.smovie = { load, pause: () => { holdEnd(); v.pause(); }, exitFullScreen: exitFS,
   fullScreen: on => document.body.classList.toggle('full', !!on) };
@@ -658,6 +829,7 @@ function key(k, shift) {
   else if (k === ']' || k === '=') speed(1);
   else if (k === '\\') { v.playbackRate = 1; store.set('speed', 1); toast('1x 倍速'); }
   else if (k === 'f' || k === 'F') toggleFS();
+  else if (k === 'd' || k === 'D') dmToggle();
   else if (k === 'Escape' && HOST_FS) post('/fullscreen?to=off');
   else return false;
   wake(); return true;

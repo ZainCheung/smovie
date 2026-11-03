@@ -20,7 +20,7 @@ var playerKeys = []struct {
 	name string
 }{
 	{0, ui.KeySpace, " "}, {0, ui.KeyLeft, "ArrowLeft"}, {0, ui.KeyRight, "ArrowRight"},
-	{0, ui.KeyUp, "ArrowUp"}, {0, ui.KeyDown, "ArrowDown"}, {0, ui.KeyM, "m"}, {0, ui.KeyF, "f"},
+	{0, ui.KeyUp, "ArrowUp"}, {0, ui.KeyDown, "ArrowDown"}, {0, ui.KeyM, "m"}, {0, ui.KeyF, "f"}, {0, ui.KeyD, "d"},
 	{0, ui.KeyBracketLeft, "["}, {0, ui.KeyBracketRight, "]"}, {0, ui.KeyMinus, "-"}, {0, ui.KeyEqual, "="},
 	{ui.Shift, ui.KeyLeft, "Shift+ArrowLeft"}, {ui.Shift, ui.KeyRight, "Shift+ArrowRight"},
 }

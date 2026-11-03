@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"smovie/internal/hongguo"
 )
 
 func TestParseRange(t *testing.T) {
@@ -147,5 +152,35 @@ func TestMediaKey(t *testing.T) {
 		if vid, px := splitKey(key); vid != c.vid || px != c.px {
 			t.Errorf("splitKey(%s) = %s, %d", key, vid, px)
 		}
+	}
+}
+
+// Requests for an episode's danmaku at once share one load, which is kept.
+func TestEpisodeDanmakuShared(t *testing.T) {
+	old := fetchDanmaku
+	t.Cleanup(func() { fetchDanmaku = old })
+	var calls atomic.Int32
+	release := make(chan struct{})
+	fetchDanmaku = func(ctx context.Context, sid, vid string) ([]hongguo.Danmaku, error) {
+		calls.Add(1)
+		<-release
+		return []hongguo.Danmaku{{Time: 1, Text: "hi", Color: "#FFFFFF"}}, nil
+	}
+	s := &mediaServer{}
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if d, err := s.episodeDanmaku("1", "2"); err != nil || len(d) != 1 {
+				t.Errorf("got %v %v", d, err)
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if _, err := s.episodeDanmaku("1", "2"); err != nil || calls.Load() != 1 {
+		t.Fatalf("calls = %d, err %v", calls.Load(), err)
 	}
 }

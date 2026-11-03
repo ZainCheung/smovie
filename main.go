@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -379,7 +380,7 @@ func (a *app) playAt(index int, start float64) {
 	saveHistory(append([]watched(nil), a.history...))
 	j := a.lib.ensure(key)
 	a.job = j
-	info := episodeInfo{VID: vid, Key: key, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
+	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
 	a.lib.setPlaying(key)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
@@ -545,6 +546,8 @@ func (a *app) aspect() float32 {
 var onReady func(*app)
 
 func main() {
+	// The danmaku API hands each anonymous identity its own subset: keep one.
+	hongguo.DanmakuIdentityFile = filepath.Join(configDir(), "danmaku-device.json")
 	a := newApp()
 	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress, fullScreen: a.fullScreen, quality: a.setQuality})
 	if err != nil {
