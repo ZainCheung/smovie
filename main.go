@@ -31,8 +31,13 @@ type feed struct {
 	loading    bool
 	err        string
 	seq        int
-	loadedAt   time.Time // of the first page, to refresh it once old
+	loadedAt   time.Time       // of the first page, to refresh it once old
+	genres     []hongguo.Genre // a category's, to narrow it to
 }
+
+// Feeds are keyed by what they list: a category ("real-drama"), one of
+// its genres ("real-drama/clan"), a chart ("rank/hot-drama") or "search".
+func rankKey(slug string) string { return "rank/" + slug }
 
 func (f *feed) more() bool { return !f.loading && f.page < f.totalPages }
 
@@ -97,7 +102,12 @@ type app struct {
 	seasonDisk   map[string][]hongguo.Season // the seasons found before, on disk
 	albums       []followed
 	panelSeasons bool
-	descOpen     bool
+
+	// The genre each category shows ("" for all of it), and the chart the
+	// home page and the charts page show.
+	genre    map[string]string
+	board    string
+	descOpen bool
 
 	// The player fills the screen (hostFullScreen); the window was not in
 	// full screen before, so it leaves it after.
@@ -118,6 +128,8 @@ func newApp() *app {
 		history:      loadHistory(),
 		myList:       loadMyList(),
 		albums:       loadAlbums(),
+		genre:        map[string]string{},
+		board:        hongguo.Rankings[0].Slug,
 		seasons:      map[string]*loaded[[]hongguo.Season]{},
 		episodeCache: map[string]*hongguo.Detail{},
 		infos:        map[string]*loaded[hongguo.SeriesInfo]{},
@@ -164,9 +176,14 @@ func (a *app) loadFeed(key string, page int) {
 		defer cancel()
 		var p *hongguo.Page
 		var err error
-		if key == "search" {
+		switch cat, genre, narrowed := strings.Cut(key, "/"); {
+		case key == "search":
 			p, err = hongguo.Search(ctx, query, page)
-		} else {
+		case cat == "rank":
+			p, err = hongguo.Rank(ctx, genre, page)
+		case narrowed:
+			p, err = hongguo.BrowseGenre(ctx, cat, genre, page)
+		default:
 			p, err = hongguo.Browse(ctx, key, page)
 		}
 		a.win.Update(func() {
@@ -194,6 +211,9 @@ func (a *app) loadFeed(key string, page int) {
 			if page <= 1 {
 				f.items = nil
 			}
+			if len(p.Genres) > 0 {
+				f.genres = p.Genres
+			}
 			seen := map[string]bool{}
 			for _, s := range f.items {
 				seen[s.ID] = true
@@ -215,7 +235,7 @@ func (a *app) ensureFeed(key string) *feed {
 	if f.page == 0 && !f.loading && f.err == "" {
 		if key != "search" && len(f.items) == 0 {
 			if p, ok := loadCatalog(key); ok {
-				f.items, f.page, f.totalPages = p.Items, 1, p.TotalPages
+				f.items, f.page, f.totalPages, f.genres = p.Items, 1, p.TotalPages, p.Genres
 				f.page = 0 // still loads it afresh below
 			}
 		}
@@ -224,13 +244,12 @@ func (a *app) ensureFeed(key string) *feed {
 	return f
 }
 
-// refreshFeeds loads again the first page of the categories that loaded
-// long ago and showed no more of it, as the catalog changes.
+// refreshFeeds loads again the first page of the lists that loaded long
+// ago and showed no more of it, as the catalog and charts change.
 func (a *app) refreshFeeds() {
-	for _, cat := range hongguo.Categories {
-		f := a.feed(cat.Slug)
-		if f.page == 1 && !f.loading && time.Since(f.loadedAt) > catalogTTL {
-			a.loadFeed(cat.Slug, 1)
+	for key, f := range a.feeds {
+		if key != "search" && f.page == 1 && !f.loading && time.Since(f.loadedAt) > catalogTTL {
+			a.loadFeed(key, 1)
 		}
 	}
 }

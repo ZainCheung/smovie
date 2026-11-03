@@ -75,6 +75,8 @@ func (a *app) view(c *ui.Context) {
 				a.settingsPage(c)
 			case "mylist":
 				a.myListPage(c)
+			case "rank":
+				a.rankPage(c)
 			default:
 				a.categoryPage(c, a.page)
 			}
@@ -117,6 +119,7 @@ func (a *app) navBar(c *ui.Context, scrolled float32) {
 			for _, cat := range hongguo.Categories {
 				a.navTab(c, cat.Slug, cat.Label)
 			}
+			a.navTab(c, "rank", "排行榜")
 			a.navTab(c, "mylist", "我的片单")
 		})
 		ui.Spacer(c)

@@ -34,6 +34,7 @@ type Series struct {
 	Tags         []string
 	EpisodeCount int
 	EpisodeLabel string // "全80集", "更新至12集"…
+	Heat         string `json:",omitempty"` // "9667万热度", as rankings tell
 }
 
 // Category is a catalog section of the official site.
@@ -54,7 +55,18 @@ type Page struct {
 	Items      []Series
 	Page       int
 	TotalPages int
+	// Genres are the category's own, to narrow it to: those the site
+	// lists beside a category.
+	Genres []Genre `json:",omitempty"`
 }
+
+// Genre is a topic a category narrows to, as 家族 within 真人剧.
+type Genre struct {
+	Slug  string
+	Label string
+}
+
+var genrePattern = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
 // flexInt decodes a JSON number or a numeric string.
 type flexInt int
@@ -150,10 +162,22 @@ func readRouterData(html []byte, v any) error {
 
 // Browse loads a page of a catalog category.
 func Browse(ctx context.Context, category string, page int) (*Page, error) {
+	return BrowseGenre(ctx, category, "", page)
+}
+
+// BrowseGenre loads a page of a category narrowed to one of its genres;
+// all of it for none.
+func BrowseGenre(ctx context.Context, category, genre string, page int) (*Page, error) {
 	if page < 1 {
 		page = 1
 	}
 	u := SiteOrigin + "/category/" + url.PathEscape(category)
+	if genre != "" {
+		if !genrePattern.MatchString(genre) {
+			return nil, errors.New("分类无效")
+		}
+		u += "/" + genre
+	}
 	if page > 1 {
 		u += "?page=" + strconv.Itoa(page)
 	}
@@ -177,11 +201,24 @@ func Browse(ctx context.Context, category string, page int) (*Page, error) {
 				PageNum    int `json:"pageNum"`
 				TotalPages int `json:"totalPages"`
 			} `json:"pagination"`
+			SelectorList []struct {
+				Items []struct {
+					ID   string `json:"selector_item_id"`
+					Name string `json:"show_name"`
+				} `json:"items"`
+			} `json:"selectorList"`
 		}
 		if json.Unmarshal(raw, &data) != nil || data.CategoryRoute.ContentType != category {
 			continue
 		}
 		out := &Page{Page: page, TotalPages: data.Pagination.TotalPages}
+		for _, row := range data.SelectorList {
+			for _, it := range row.Items {
+				if name := strings.TrimSpace(it.Name); genrePattern.MatchString(it.ID) && name != "" {
+					out.Genres = append(out.Genres, Genre{Slug: it.ID, Label: name})
+				}
+			}
+		}
 		seen := map[string]bool{}
 		for _, r := range data.RecommendList {
 			s := r.series()

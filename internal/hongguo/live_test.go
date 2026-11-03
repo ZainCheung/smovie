@@ -124,3 +124,34 @@ func TestLiveSeasons(t *testing.T) {
 		}
 	}
 }
+
+// go test -run LiveCatalog ./internal/hongguo -v  (with SMOVIE_LIVE=1)
+func TestLiveCatalog(t *testing.T) {
+	if os.Getenv("SMOVIE_LIVE") == "" {
+		t.Skip("set SMOVIE_LIVE=1 to hit the network")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	for _, cat := range Categories {
+		p, err := Browse(ctx, cat.Slug, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s: %d genres", cat.Label, len(p.Genres))
+		if len(p.Genres) == 0 {
+			t.Fatal("no genres")
+		}
+		g, err := BrowseGenre(ctx, cat.Slug, p.Genres[0].Slug, 2)
+		if err != nil || len(g.Items) == 0 {
+			t.Fatalf("%s/%s: %v", cat.Slug, p.Genres[0].Slug, err)
+		}
+		t.Logf("  %s p2/%d: %s", p.Genres[0].Label, g.TotalPages, g.Items[0].Title)
+	}
+	for _, r := range Rankings {
+		p, err := Rank(ctx, r.Slug, 2)
+		if err != nil || len(p.Items) == 0 {
+			t.Fatalf("%s: %v", r.Slug, err)
+		}
+		t.Logf("%s p2/%d: %s %s", r.Label, p.TotalPages, p.Items[0].Title, p.Items[0].Heat)
+	}
+}

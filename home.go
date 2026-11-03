@@ -49,6 +49,7 @@ func (a *app) homePage(c *ui.Context) {
 	ui.Column(c).Gap(30).Padding(0, 0, 56, 0).Margin(-70, 0, 0, 0).Children(func() {
 		a.continueRow(c)
 		a.myListRow(c)
+		a.rankRow(c)
 		titles := map[string]string{"real-drama": "热播真人剧", "comic-drama": "人气漫剧", "ai-drama": "AI 剧场"}
 		for _, cat := range hongguo.Categories {
 			f := a.feed(cat.Slug)
@@ -465,13 +466,23 @@ func (a *app) categoryPage(c *ui.Context, slug string) {
 		a.heroPlaceholder(c, f)
 	}
 	ui.Column(c).Margin(-70, 0, 0, 0).Gap(16).Padding(0, pagePad, 56, pagePad).Children(func() {
+		key, list := a.categoryFeed(slug)
 		ui.Row(c).AlignItems(ui.End).Gap(12).Children(func() {
-			ui.Text(c, "全部"+label).FontSize(22).FontWeight(700)
-			if f.totalPages > 0 {
-				ui.Textf(c, "已加载 %d 部", len(f.items)).FontSize(12).TextColor(colorFaint)
+			title := "全部" + label
+			if g := a.genre[slug]; g != "" {
+				title = label + " · " + genreLabel(f.genres, g)
+			}
+			ui.Text(c, title).FontSize(22).FontWeight(700)
+			if list.totalPages > 0 {
+				ui.Textf(c, "已加载 %d 部", len(list.items)).FontSize(12).TextColor(colorFaint)
 			}
 		})
-		a.posterGrid(c, slug, f)
+		a.genreChips(c, slug, f.genres)
+		if len(list.items) == 0 && list.loading {
+			ui.Row(c).Justify(ui.Center).Padding(40, 0).Children(func() { ui.Spinner(c).FontSize(24) })
+			return
+		}
+		a.posterGrid(c, key, list)
 	})
 }
 
