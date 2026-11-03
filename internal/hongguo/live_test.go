@@ -31,7 +31,7 @@ func TestLive(t *testing.T) {
 	}
 	t.Logf("episodes: %s %d vids", d.Title, len(d.VIDs))
 	vid := d.VIDs[len(d.VIDs)-1] // the last one, beyond the website's free range
-	info, err := ResolvePlay(ctx, vid)
+	info, err := ResolvePlay(ctx, vid, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

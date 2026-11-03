@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,7 +21,24 @@ type library struct {
 	mu    sync.Mutex
 	jobs  map[string]*job
 	limit atomic.Int64 // bytes of episodes kept on disk
-	keep  atomic.Value // string: the episode playing, which stays
+	keep  atomic.Value // string: the key of the episode playing, which stays
+	// quals are the resolutions each episode has, by vid, once resolved.
+	quals map[string][]int
+}
+
+// Episodes are kept by key: the vid for the highest resolution, or
+// vid_px for the highest up to px, the user's choice of quality.
+func mediaKey(vid string, px int) string {
+	if px <= 0 {
+		return vid
+	}
+	return vid + "_" + strconv.Itoa(px)
+}
+
+func splitKey(key string) (vid string, px int) {
+	vid, p, _ := strings.Cut(key, "_")
+	px, _ = strconv.Atoi(p)
+	return vid, px
 }
 
 // job prepares one episode. Its fields other than done are safe to read
@@ -97,7 +115,7 @@ func newLibrary() *library {
 	if err != nil {
 		base = os.TempDir()
 	}
-	l := &library{dir: filepath.Join(base, "smovie", "media"), jobs: map[string]*job{}}
+	l := &library{dir: filepath.Join(base, "smovie", "media"), jobs: map[string]*job{}, quals: map[string][]int{}}
 	l.limit.Store(videoCacheSizes[defaultVideoCache])
 	_ = os.MkdirAll(l.dir, 0o755)
 	// Episodes a quit cut off half way.
@@ -109,25 +127,25 @@ func newLibrary() *library {
 	return l
 }
 
-func (l *library) path(vid string) string { return filepath.Join(l.dir, vid+".mp4") }
+func (l *library) path(key string) string { return filepath.Join(l.dir, key+".mp4") }
 
 // partPath marks an episode whose file is still being written: it streams
 // in place, as renaming a file a player has open fails on Windows.
-func (l *library) partPath(vid string) string { return filepath.Join(l.dir, vid+".part") }
+func (l *library) partPath(key string) string { return filepath.Join(l.dir, key+".part") }
 
-func (l *library) cached(vid string) bool {
-	st, err := os.Stat(l.path(vid))
+func (l *library) cached(key string) bool {
+	st, err := os.Stat(l.path(key))
 	if err != nil || st.Size() == 0 {
 		return false
 	}
-	_, err = os.Stat(l.partPath(vid))
+	_, err = os.Stat(l.partPath(key))
 	return os.IsNotExist(err)
 }
 
-// streaming returns the job of vid while its file grows in place.
-func (l *library) streaming(vid string) *job {
+// streaming returns the job of key while its file grows in place.
+func (l *library) streaming(key string) *job {
 	l.mu.Lock()
-	j := l.jobs[vid]
+	j := l.jobs[key]
 	l.mu.Unlock()
 	if j == nil || !j.stream.Load() {
 		return nil
@@ -135,18 +153,18 @@ func (l *library) streaming(vid string) *job {
 	return j
 }
 
-// ensure starts preparing vid unless it is on disk or on its way.
-func (l *library) ensure(vid string) *job {
+// ensure starts preparing key unless it is on disk or on its way.
+func (l *library) ensure(key string) *job {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if j, ok := l.jobs[vid]; ok && (!j.Finished() || j.err == nil) {
+	if j, ok := l.jobs[key]; ok && (!j.Finished() || j.err == nil) {
 		return j
 	}
 	j := &job{done: make(chan struct{})}
-	l.jobs[vid] = j
-	if l.cached(vid) {
+	l.jobs[key] = j
+	if l.cached(key) {
 		now := time.Now()
-		_ = os.Chtimes(l.path(vid), now, now) // used again: pruned last
+		_ = os.Chtimes(l.path(key), now, now) // used again: pruned last
 		j.phase.Store("ready")
 		close(j.done)
 		return j
@@ -157,23 +175,25 @@ func (l *library) ensure(vid string) *job {
 		defer close(j.done)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		info, err := resolvePlay(ctx, vid)
+		vid, px := splitKey(key)
+		info, err := resolvePlay(ctx, vid, px)
 		if err != nil {
 			j.err = err
 			j.phase.Store("error")
 			return
 		}
+		l.setQualities(vid, info.Qualities)
 		j.quality.Store(info.Quality)
 		j.width.Store(int64(info.Width))
 		j.height.Store(int64(info.Height))
 		j.phase.Store("downloading")
-		part := l.partPath(vid)
+		part := l.partPath(key)
 		if err := os.WriteFile(part, nil, 0o644); err != nil {
 			j.err = err
 			j.phase.Store("error")
 			return
 		}
-		err = hongguo.Download(ctx, info, l.path(vid), func(p hongguo.Progress) {
+		err = hongguo.Download(ctx, info, l.path(key), func(p hongguo.Progress) {
 			j.received.Store(p.Received)
 			j.total.Store(p.Total)
 			j.ready.Store(p.Ready)
@@ -188,8 +208,8 @@ func (l *library) ensure(vid string) *job {
 		if err != nil {
 			j.err = err
 			j.phase.Store("error")
-			_ = os.Remove(l.path(vid)) // fails while a player has it open on Windows: the .part stays and marks it
-			if _, serr := os.Stat(l.path(vid)); os.IsNotExist(serr) {
+			_ = os.Remove(l.path(key)) // fails while a player has it open on Windows: the .part stays and marks it
+			if _, serr := os.Stat(l.path(key)); os.IsNotExist(serr) {
 				_ = os.Remove(part)
 			}
 			return
@@ -208,16 +228,16 @@ func (l *library) setLimit(limit int64) {
 }
 
 // setPlaying tells the episode playing, which pruning leaves.
-func (l *library) setPlaying(vid string) { l.keep.Store(vid) }
+func (l *library) setPlaying(key string) { l.keep.Store(key) }
 
-// busy reports whether vid plays or is being prepared.
-func (l *library) busy(vid string) bool {
-	if k, _ := l.keep.Load().(string); k == vid {
+// busy reports whether key plays or is being prepared.
+func (l *library) busy(key string) bool {
+	if k, _ := l.keep.Load().(string); k == key {
 		return true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	j := l.jobs[vid]
+	j := l.jobs[key]
 	return j != nil && !j.Finished()
 }
 
@@ -231,7 +251,7 @@ func (l *library) pruneTo(limit int64) {
 		return
 	}
 	type file struct {
-		path, vid string
+		path, key string
 		size      int64
 		mod       time.Time
 	}
@@ -251,14 +271,14 @@ func (l *library) pruneTo(limit int64) {
 		if total <= limit {
 			break
 		}
-		if l.busy(f.vid) {
+		if l.busy(f.key) {
 			continue
 		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
 			l.mu.Lock()
-			if j := l.jobs[f.vid]; j != nil && j.Finished() {
-				delete(l.jobs, f.vid) // prepares it again when asked
+			if j := l.jobs[f.key]; j != nil && j.Finished() {
+				delete(l.jobs, f.key) // prepares it again when asked
 			}
 			l.mu.Unlock()
 		}
@@ -278,22 +298,27 @@ type episodeStatus struct {
 	Received int64  `json:"received"`
 	Total    int64  `json:"total"`
 	Quality  string `json:"quality"`
+	// Qualities are the resolutions the episode has, highest first, once
+	// known.
+	Qualities []int `json:"qualities,omitempty"`
 	// Stream tells that the episode plays while it downloads.
 	Stream bool   `json:"stream,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
 
-func (l *library) status(vid string) episodeStatus {
+func (l *library) status(key string) episodeStatus {
+	vid, _ := splitKey(key)
 	l.mu.Lock()
-	j := l.jobs[vid]
+	j := l.jobs[key]
+	quals := l.quals[vid]
 	l.mu.Unlock()
 	if j == nil {
-		if l.cached(vid) {
-			return episodeStatus{Phase: "ready"}
+		if l.cached(key) {
+			return episodeStatus{Phase: "ready", Qualities: quals}
 		}
-		return episodeStatus{Phase: "resolving"}
+		return episodeStatus{Phase: "resolving", Qualities: quals}
 	}
-	st := episodeStatus{Phase: j.Phase(), Received: j.received.Load(), Total: j.total.Load(), Quality: j.Quality(), Stream: j.stream.Load()}
+	st := episodeStatus{Phase: j.Phase(), Received: j.received.Load(), Total: j.total.Load(), Quality: j.Quality(), Stream: j.stream.Load(), Qualities: quals}
 	if j.Finished() && j.err != nil {
 		st.Phase, st.Error = "error", j.err.Error()
 	}
@@ -301,12 +326,45 @@ func (l *library) status(vid string) episodeStatus {
 }
 
 // size returns the picture's size, when known before it plays.
-func (l *library) size(vid string) (int, int) {
+func (l *library) size(key string) (int, int) {
 	l.mu.Lock()
-	j := l.jobs[vid]
+	j := l.jobs[key]
 	l.mu.Unlock()
 	if j == nil {
 		return 0, 0
 	}
 	return int(j.width.Load()), int(j.height.Load())
+}
+
+// knownQualities returns the resolutions vid has, when known.
+func (l *library) knownQualities(vid string) []int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.quals[vid]
+}
+
+func (l *library) setQualities(vid string, q []int) {
+	if len(q) == 0 {
+		return
+	}
+	l.mu.Lock()
+	l.quals[vid] = q
+	l.mu.Unlock()
+}
+
+// qualities returns the resolutions vid has, asking the API when no job
+// told them, as for an episode played from the disk.
+func (l *library) qualities(ctx context.Context, vid string) []int {
+	l.mu.Lock()
+	q, ok := l.quals[vid]
+	l.mu.Unlock()
+	if ok {
+		return q
+	}
+	info, err := resolvePlay(ctx, vid, 0)
+	if err != nil {
+		return nil
+	}
+	l.setQualities(vid, info.Qualities)
+	return info.Qualities
 }

@@ -70,6 +70,7 @@ type app struct {
 
 	saved      settings // as last saved
 	videoCache int      // index of videoCacheSizes
+	quality    int      // the highest resolution to play; 0 for any
 	usage      usage
 
 	// What plays.
@@ -115,6 +116,7 @@ func newApp() *app {
 		autoNext:     st.AutoNext,
 		saved:        st,
 		videoCache:   st.VideoCache,
+		quality:      st.Quality,
 		current:      -1,
 		heroAt:       time.Now(),
 	}
@@ -344,24 +346,41 @@ func (a *app) episodes(s hongguo.Series, done func(*hongguo.Detail, error)) {
 	}()
 }
 
-func (a *app) play(index int) {
+// mediaKey is the key of vid's media at the quality chosen: the highest
+// there is when that is no higher than the choice.
+func (a *app) mediaKey(vid string) string {
+	px := a.quality
+	if q := a.lib.knownQualities(vid); len(q) > 0 && px >= q[0] {
+		px = 0
+	}
+	return mediaKey(vid, px)
+}
+
+func (a *app) play(index int) { a.playAt(index, -1) }
+
+// playAt plays the episode index from start seconds, or, for -1, where
+// the user left it.
+func (a *app) playAt(index int, start float64) {
 	if a.detail == nil || index < 0 || index >= len(a.detail.VIDs) {
 		return
 	}
 	a.current = index
 	a.epRange = index / epBlock
 	vid := a.detail.VIDs[index]
+	key := a.mediaKey(vid)
 	total := len(a.detail.VIDs)
-	var start float64
-	if w, ok := a.watchOf(a.detail.ID); ok && !w.Finished {
-		start = w.resumeAt(index)
+	if start < 0 {
+		start = 0
+		if w, ok := a.watchOf(a.detail.ID); ok && !w.Finished {
+			start = w.resumeAt(index)
+		}
 	}
 	a.history = recordWatch(a.history, a.detail.Series, index, total)
 	saveHistory(append([]watched(nil), a.history...))
-	j := a.lib.ensure(vid)
+	j := a.lib.ensure(key)
 	a.job = j
-	info := episodeInfo{VID: vid, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
-	a.lib.setPlaying(vid)
+	info := episodeInfo{VID: vid, Key: key, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
+	a.lib.setPlaying(key)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
 	a.playSeq++
@@ -374,7 +393,7 @@ func (a *app) play(index int) {
 			}
 			// Prefetch the next episode so continuous play does not wait.
 			if next := index + 1; a.detail != nil && next < len(a.detail.VIDs) {
-				a.lib.ensure(a.detail.VIDs[next])
+				a.lib.ensure(a.mediaKey(a.detail.VIDs[next]))
 			}
 		})
 	}()
@@ -396,6 +415,17 @@ func (a *app) step(vid string, delta int, ended bool) {
 			return
 		}
 		a.play(a.current + delta)
+	})
+}
+
+// setQuality plays vid, which plays at pos, at the quality px from now on.
+func (a *app) setQuality(vid string, px int, pos float64) {
+	a.win.Update(func() {
+		a.quality = px
+		a.syncSettings()
+		if a.isCurrent(vid) && a.mediaKey(vid) != a.server.currentKey() {
+			a.playAt(a.current, pos)
+		}
 	})
 }
 
@@ -499,7 +529,7 @@ func (a *app) aspect() float32 {
 	if r, ok := a.aspects[vid]; ok {
 		return r
 	}
-	if w, h := a.lib.size(vid); w > 0 && h > 0 {
+	if w, h := a.lib.size(a.mediaKey(vid)); w > 0 && h > 0 {
 		return float32(w) / float32(h)
 	}
 	// Episodes of a series share a shape: use another's.
@@ -516,7 +546,7 @@ var onReady func(*app)
 
 func main() {
 	a := newApp()
-	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress, fullScreen: a.fullScreen})
+	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress, fullScreen: a.fullScreen, quality: a.setQuality})
 	if err != nil {
 		log.Fatal(err)
 	}

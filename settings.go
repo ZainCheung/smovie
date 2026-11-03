@@ -19,6 +19,9 @@ const defaultVideoCache = 1
 type settings struct {
 	AutoNext   bool `json:"autoNext"`
 	VideoCache int  `json:"videoCache"` // index of videoCacheSizes
+	// Quality is the highest resolution to play, the shorter side in
+	// pixels; 0 for the highest there is.
+	Quality int `json:"quality,omitempty"`
 }
 
 func defaultSettings() settings { return settings{AutoNext: true, VideoCache: defaultVideoCache} }
@@ -46,6 +49,9 @@ func loadSettings() settings {
 	if s.VideoCache < 0 || s.VideoCache >= len(videoCacheSizes) {
 		s.VideoCache = defaultVideoCache
 	}
+	if s.Quality < 0 {
+		s.Quality = 0
+	}
 	return s
 }
 
@@ -67,7 +73,7 @@ func saveSettings(s settings) {
 // syncSettings saves the settings once they changed; the view calls it,
 // as switches change them in place.
 func (a *app) syncSettings() {
-	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache}
+	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality}
 	if cur == a.saved {
 		return
 	}

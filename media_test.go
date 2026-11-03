@@ -133,3 +133,19 @@ func TestServeGrowingFails(t *testing.T) {
 		t.Fatalf("read %d bytes of a failed download without an error", len(b))
 	}
 }
+
+func TestMediaKey(t *testing.T) {
+	for _, c := range []struct {
+		vid string
+		px  int
+		key string
+	}{{"123", 0, "123"}, {"123", 720, "123_720"}} {
+		key := mediaKey(c.vid, c.px)
+		if key != c.key || !keyPattern.MatchString(key) {
+			t.Errorf("mediaKey(%s, %d) = %s", c.vid, c.px, key)
+		}
+		if vid, px := splitKey(key); vid != c.vid || px != c.px {
+			t.Errorf("splitKey(%s) = %s, %d", key, vid, px)
+		}
+	}
+}

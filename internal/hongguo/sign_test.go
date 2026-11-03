@@ -6,10 +6,12 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,7 +136,7 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 		}
 		return respond(`{"code":0,"data":{"123":{"video_model":{"video_list":[{"main_url":"https://example.fqnovelvod.com/video.mp4","codec_type":"h264","width":720,"height":1280}]}}}}`)
 	})}
-	info, err := ResolvePlay(context.Background(), "123")
+	info, err := ResolvePlay(context.Background(), "123", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,5 +148,35 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 	}
 	if info.URL != "https://example.fqnovelvod.com/video.mp4" || info.Quality != "720P" {
 		t.Fatalf("unexpected source %+v", info)
+	}
+}
+
+// ResolvePlay plays the highest resolution up to the one asked for, the
+// lowest when all are higher, and tells them all.
+func TestResolvePlayQuality(t *testing.T) {
+	oldClient, oldDev := httpClient, cachedDev
+	t.Cleanup(func() { httpClient, cachedDev = oldClient, oldDev })
+	cachedDev = &device{DeviceID: "1234567890123456789", IID: "2345678901234567890", CDID: "original-device"}
+	httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+		row := func(px, w, h int) string {
+			return `{"main_url":"https://example.fqnovelvod.com/` + strconv.Itoa(px) + `.mp4","codec_type":"h264","width":` + strconv.Itoa(w) + `,"height":` + strconv.Itoa(h) + `}`
+		}
+		body := `{"code":0,"data":{"123":{"video_model":{"video_list":[` + row(540, 540, 960) + `,` + row(1080, 1080, 1920) + `,` + row(720, 720, 1280) + `]}}}}`
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body))}, nil
+	})}
+	for _, c := range []struct {
+		max  int
+		want string
+	}{{0, "1080P"}, {1080, "1080P"}, {900, "720P"}, {720, "720P"}, {540, "540P"}, {360, "540P"}} {
+		info, err := ResolvePlay(context.Background(), "123", c.max)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Quality != c.want || !strings.HasSuffix(info.URL, "/"+strings.TrimSuffix(c.want, "P")+".mp4") {
+			t.Errorf("max %d: got %s %s, want %s", c.max, info.Quality, info.URL, c.want)
+		}
+		if fmt.Sprint(info.Qualities) != "[1080 720 540]" {
+			t.Errorf("qualities %v", info.Qualities)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -10,13 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
-var vidPattern = regexp.MustCompile(`^\d{1,30}$`)
+var (
+	vidPattern = regexp.MustCompile(`^\d{1,30}$`)
+	keyPattern = regexp.MustCompile(`^\d{1,30}(_\d{1,5})?$`) // see mediaKey
+)
 
 // episodeInfo is the episode the player page shows.
 type episodeInfo struct {
 	VID    string  `json:"vid"`
+	Key    string  `json:"key"` // of its media, of the quality chosen
 	Ep     int     `json:"ep"`
 	Total  int     `json:"total"`
 	Title  string  `json:"title"`
@@ -34,6 +40,9 @@ type playerEvents struct {
 	fullScreen func(to string)
 	// progress tells where vid is, of its duration, and that it ended.
 	progress func(vid string, pos, dur float64, ended bool)
+	// quality chooses the resolution to play, px the shorter side, while
+	// vid plays at pos.
+	quality func(vid string, px int, pos float64)
 }
 
 // mediaServer serves the player page and the decrypted episodes to the
@@ -67,7 +76,8 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		}
 		_, _ = strings.NewReplacer("{{MUTED}}", muted,
 			"{{HOST_FS}}", strconv.FormatBool(hostFullScreen),
-			"{{CUSTOM}}", strconv.FormatBool(customControls())).WriteString(w, playerHTML)
+			"{{CUSTOM}}", strconv.FormatBool(customControls()),
+			"{{LAYOUT}}", controlsLayout()).WriteString(w, playerHTML)
 	})
 	mux.HandleFunc("GET /media/{file}", s.media)
 	mux.HandleFunc("GET /current", func(w http.ResponseWriter, r *http.Request) {
@@ -77,12 +87,31 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		writeJSON(w, cur)
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("v")
+		if !keyPattern.MatchString(key) {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, s.lib.status(key))
+	})
+	mux.HandleFunc("GET /qualities", func(w http.ResponseWriter, r *http.Request) {
 		vid := r.URL.Query().Get("v")
 		if !vidPattern.MatchString(vid) {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, s.lib.status(vid))
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		writeJSON(w, s.lib.qualities(ctx, vid))
+	})
+	mux.HandleFunc("POST /quality", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		px, err1 := strconv.Atoi(q.Get("q"))
+		pos, err2 := strconv.ParseFloat(q.Get("t"), 64)
+		if vid := q.Get("v"); vidPattern.MatchString(vid) && err1 == nil && px >= 0 && px < 100000 && err2 == nil && pos >= 0 {
+			s.events.quality(vid, px, pos)
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /step", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -133,11 +162,21 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 	return s, nil
 }
 
-// customControls is whether the player draws its own controls: everywhere
-// but macOS, whose WebKit controls fit the system, where WebView2's look
-// out of place. SMOVIE_CUSTOM_CONTROLS=1 shows them on macOS too.
+// customControls is whether the player draws its own controls, which it
+// does everywhere; SMOVIE_NATIVE_CONTROLS=1 shows WebKit's on macOS.
 func customControls() bool {
-	return runtime.GOOS != "darwin" || os.Getenv("SMOVIE_CUSTOM_CONTROLS") != ""
+	return runtime.GOOS != "darwin" || os.Getenv("SMOVIE_NATIVE_CONTROLS") == ""
+}
+
+// controlsLayout is how the controls are laid out: on macOS as video sites
+// have them, the progress bar along the top and below it play, volume and
+// time at the left, quality, speed and full screen at the right ("yt");
+// elsewhere in one row with the episode buttons ("").
+func controlsLayout() string {
+	if runtime.GOOS == "darwin" {
+		return "yt"
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -156,9 +195,16 @@ func (s *mediaServer) setCurrent(info episodeInfo) {
 	s.mu.Unlock()
 }
 
+// currentKey is the media key of the episode the page shows.
+func (s *mediaServer) currentKey() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.current.Key
+}
+
 func (s *mediaServer) media(w http.ResponseWriter, r *http.Request) {
 	vid := strings.TrimSuffix(r.PathValue("file"), ".mp4")
-	if !vidPattern.MatchString(vid) {
+	if !keyPattern.MatchString(vid) {
 		http.NotFound(w, r)
 		return
 	}
@@ -270,11 +316,11 @@ func parseRange(v string, total int64) (start, end int64, ok bool) {
 	return start, end, true
 }
 
-// playerHTML plays episodes with WebKit's own controls. They take no
-// buttons of a page's, so previous and next episode float at the sides of
-// the picture and answer the media keys through Media Session; and full
-// screen, which for a <video> would leave those buttons behind, is the
-// page's.
+// playerHTML plays episodes with controls of its own, of frosted glass:
+// on macOS laid out as video sites have them, elsewhere in one row with
+// the episode buttons. Previous and next also answer the media keys
+// through Media Session; and full screen, which for a <video> would leave
+// the controls behind, is the page's.
 const playerHTML = `<!doctype html>
 <html><head><meta charset="utf-8">
 <style>
@@ -370,6 +416,24 @@ svg{display:block}
   .opt{display:none}
 }
 @media (max-width:380px){ #pip{display:none} }
+/* --- macOS (yt): as video sites have them, the progress bar along the top of
+   the glass, and below it play, volume and time at the left; quality, speed
+   and full screen at the right. --- */
+#qwrap{display:none}
+body.yt #qwrap{display:block}
+body.yt #bar{grid-template-columns:1fr auto;grid-template-areas:"s s" "l r";row-gap:0;column-gap:8px;
+  left:12px;right:12px;bottom:12px;padding:4px 8px 6px;border-radius:20px}
+body.yt #seek{padding:0 8px}
+body.yt .track{height:18px}
+body.yt #prog .fill,body.yt #prog .knob{background:#ff0033}
+body.yt #bl,body.yt #br{gap:4px}
+body.yt .ytime{margin-left:6px;flex:none}
+body.yt .txt{width:auto;min-width:44px;padding:0 10px;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+body.yt .txt sup{font-size:9px;font-weight:800;margin-left:1px;color:#ff5a62;vertical-align:5px}
+body.yt .menu button,body.yt .menu .hint{white-space:nowrap}
+body.yt .menu .lab{display:flex;align-items:center;gap:6px}
+body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rgba(255,255,255,.5)}
+@media (max-width:420px){ body.yt .ytime{display:none} }
 </style></head>
 <body>
 <video id="v" controls playsinline preload="auto"></video>
@@ -400,6 +464,7 @@ svg{display:block}
   <div class="grp" id="br">
     <div id="vol"><button class="cb" id="mute" title="静音 (M)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-on"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-off"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="m16 9 6 6M22 9l-6 6"/></svg></button>
       <div class="track" id="volbar"><div class="rail"></div><div class="fill"></div><div class="knob"></div></div></div>
+    <div class="wrap" id="qwrap"><button class="cb txt" id="q" title="清晰度">清晰度</button><div class="menu" id="qmenu"></div></div>
     <div class="wrap"><button class="cb" id="spd" title="倍速 ([ / ])">1x</button><div class="menu" id="spdmenu"></div></div>
     <button class="cb opt" id="pip" title="画中画"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg></button>
     <button class="cb" id="fs" title="全屏 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-enter"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-exit"><path d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4"/></svg></button>
@@ -408,8 +473,9 @@ svg{display:block}
 <div id="hold">2x 快进中 <i>▶▶</i></div>
 <script>
 const $ = id => document.getElementById(id);
-const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}};
+const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}}, YT = CUSTOM && '{{LAYOUT}}' === 'yt';
 let cur = null, token = 0, sent = false;
+let quals = [], switching = null; // the episode's resolutions; the quality being switched to
 let lastReport = 0;
 // report tells the app where the episode is, for the history.
 function report(ended) {
@@ -449,11 +515,13 @@ function setMetadata(info) {
 }
 function load(info) {
   if (!info || !info.vid) return;
-  if (cur && cur.vid === info.vid && v.getAttribute('src')) { cur = info; refreshNav(); return; }
+  info.key = info.key || info.vid;
+  if (cur && cur.key === info.key && v.getAttribute('src')) { cur = info; refreshNav(); return; }
+  if (!cur || cur.vid !== info.vid) { quals = []; switching = null; }
   cur = info; sent = false; const my = ++token;
   v.pause(); v.removeAttribute('src'); v.load();
   $('ltitle').textContent = '第 ' + info.ep + ' 集';
-  $('lsub').textContent = '正在获取片源…';
+  $('lsub').textContent = switching ? '正在切换至 ' + switching.label + '…' : '正在获取片源…';
   $('lprog').hidden = true;
   show('error', false); show('ended', false); show('loading', true);
   refreshNav(); setMetadata(info);
@@ -462,17 +530,18 @@ function load(info) {
 async function poll(my) {
   if (my !== token) return;
   let st;
-  try { st = await (await fetch('/status?v=' + cur.vid)).json(); } catch (_) { st = {phase: 'resolving'}; }
+  try { st = await (await fetch('/status?v=' + cur.key)).json(); } catch (_) { st = {phase: 'resolving'}; }
   if (my !== token) return;
+  if (st.qualities && st.qualities.length) quals = st.qualities;
   if (st.phase === 'ready' || st.stream) {
     show('loading', false);
-    v.src = '/media/' + cur.vid + '.mp4';
+    v.src = '/media/' + cur.key + '.mp4';
     v.play().catch(() => {});
     return;
   }
   if (st.phase === 'error') { show('loading', false); $('emsg').textContent = st.error || '未知错误'; show('error', true); return; }
   const mb = n => (n / 1048576).toFixed(1);
-  $('lsub').textContent = st.phase === 'downloading' ? ('正在缓冲 ' + (st.quality || '') + (st.total ? '  ' + mb(st.received) + ' / ' + mb(st.total) + ' MB' : ''))
+  $('lsub').textContent = switching ? '正在切换至 ' + switching.label + '…' : st.phase === 'downloading' ? ('正在缓冲 ' + (st.quality || '') + (st.total ? '  ' + mb(st.received) + ' / ' + mb(st.total) + ' MB' : ''))
     : st.phase === 'decrypting' ? '正在解密…' : '正在获取片源…';
   $('lprog').hidden = !(st.phase === 'downloading' && st.total);
   if (st.total) $('lprog').firstElementChild.style.width = (100 * st.received / st.total) + '%';
@@ -526,7 +595,8 @@ v.addEventListener('volumechange', () => { if (!MUTED) { store.set('volume', v.v
 v.addEventListener('ratechange', () => { if (v.readyState && !hold.on) store.set('speed', v.playbackRate); });
 v.addEventListener('loadedmetadata', () => {
   v.playbackRate = hold.on ? HOLD_RATE : store.get('speed', 1);
-  if (cur && cur.start > 3 && cur.start < v.duration - 5) { v.currentTime = cur.start; toast('从 ' + clock(cur.start) + ' 继续播放'); }
+  if (switching) { v.currentTime = Math.min(switching.t, Math.max(0, v.duration - 1)); toast('已切换至 ' + switching.label); switching = null; }
+  else if (cur && cur.start > 3 && cur.start < v.duration - 5) { v.currentTime = cur.start; toast('从 ' + clock(cur.start) + ' 继续播放'); }
   if (cur && v.videoWidth) post('/meta?v=' + cur.vid + '&w=' + v.videoWidth + '&h=' + v.videoHeight);
 });
 v.addEventListener('timeupdate', () => { if (!v.paused && Date.now() - lastReport > 5000) report(false); });
@@ -553,7 +623,7 @@ function wake() {
 }
 // The controls stay while the pointer is on them, drags or a menu is open.
 let overBar = false;
-const busy = () => overBar || document.querySelector('.track.drag') || $('spdmenu').classList.contains('open');
+const busy = () => overBar || document.querySelector('.track.drag') || document.querySelector('.menu.open');
 ['mousemove', 'mousedown'].forEach(e => document.addEventListener(e, wake));
 document.addEventListener('mouseleave', () => { if (!v.paused && !busy()) document.body.classList.remove('active'); });
 v.addEventListener('pause', () => { if (!v.ended) report(false); clearTimeout(idleTimer); document.body.classList.add('active'); });
@@ -638,7 +708,7 @@ const pad2 = n => String(n).padStart(2, '0');
 function hms(s) {
   s = Math.max(0, Math.floor(s || 0));
   const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
-  return (h ? h + ':' + pad2(m) : pad2(m)) + ':' + pad2(s % 60);
+  return (h ? h + ':' + pad2(m) : YT ? m : pad2(m)) + ':' + pad2(s % 60);
 }
 // slider makes el a horizontal slider: set(frac) as it is dragged or
 // clicked, done() once let go, tip(frac) the text over the pointer.
@@ -706,8 +776,12 @@ function setupControls() {
     b.onclick = () => { v.playbackRate = r; store.set('speed', r); menu.classList.remove('open'); toast(r + 'x 倍速'); };
     menu.appendChild(b);
   }
-  $('spd').onclick = e => { e.stopPropagation(); menu.classList.toggle('open'); paintSpeed(); };
-  document.addEventListener('pointerdown', e => { if (!e.target.closest('.wrap')) menu.classList.remove('open'); });
+  $('spd').onclick = e => { e.stopPropagation(); $('qmenu').classList.remove('open'); menu.classList.toggle('open'); paintSpeed(); };
+  if (YT) setupYT();
+  document.addEventListener('pointerdown', e => {
+    const w = e.target.closest('.wrap');
+    for (const m of document.querySelectorAll('.menu.open')) if (!w || !w.contains(m)) m.classList.remove('open');
+  });
   slider($('prog'), f => { if (v.duration) { scrub = f * v.duration; paintTime(); } },
     f => { if (v.duration) v.currentTime = Math.min(v.duration - 0.1, f * v.duration); scrub = -1; paintTime(); },
     f => hms(f * (v.duration || 0)));
@@ -720,8 +794,66 @@ function setupControls() {
   const playing = () => document.body.classList.toggle('playing', !v.paused);
   v.addEventListener('play', playing); v.addEventListener('pause', playing);
   const nav = refreshNav;
-  refreshNav = () => { nav(); $('cprev').disabled = !hasPrev(); $('cnext').disabled = !hasNext(); };
+  refreshNav = () => { nav(); if ($('cprev')) { $('cprev').disabled = !hasPrev(); $('cnext').disabled = !hasNext(); } };
   paintTime(); paintVolume(); paintSpeed(); refreshNav();
+}
+
+// --- macOS: the controls as video sites lay them out ---
+const qlabel = px => px + 'P';
+// playingPx is the resolution that plays, the shorter side, as the API
+// counts it.
+const playingPx = () => v.videoWidth ? Math.min(v.videoWidth, v.videoHeight) : 0;
+function paintQuality() {
+  const px = playingPx();
+  $('q').innerHTML = px ? qlabel(px) + (px >= 720 ? '<sup>HD</sup>' : '') : '清晰度';
+}
+function paintQMenu() {
+  const m = $('qmenu'), px = playingPx();
+  m.innerHTML = '';
+  if (!quals.length) {
+    const h = document.createElement('div'); h.className = 'hint'; h.textContent = '正在获取清晰度…'; m.appendChild(h);
+    return;
+  }
+  quals.forEach((q, i) => {
+    const b = document.createElement('button');
+    b.innerHTML = '<span class="lab">' + qlabel(q) + (q >= 1080 ? ' 超清' : q >= 720 ? ' 高清' : ' 标清') + '</span>';
+    b.classList.toggle('on', q === px);
+    b.onclick = () => {
+      m.classList.remove('open');
+      if (!cur || q === px) return;
+      switching = {t: v.currentTime, label: qlabel(q)};
+      post('/quality?v=' + cur.vid + '&q=' + (i === 0 ? 0 : q) + '&t=' + v.currentTime.toFixed(1));
+    };
+    m.appendChild(b);
+  });
+}
+async function openQMenu() {
+  paintQMenu();
+  if (quals.length || !cur) return;
+  const vid = cur.vid;
+  try {
+    const q = await (await fetch('/qualities?v=' + vid)).json();
+    if (cur && cur.vid === vid && Array.isArray(q)) { quals = q; if ($('qmenu').classList.contains('open')) paintQMenu(); }
+  } catch (_) {}
+}
+function setupYT() {
+  document.body.classList.add('yt');
+  // Left: play, volume, time; the progress bar alone above; right: quality,
+  // speed, full screen. Episodes change from the list, Shift+arrows and
+  // the media keys.
+  const bl = $('bl'), br = $('br');
+  for (const id of ['cprev', 'cnext', 'back', 'fwd', 'pip']) { const el = $(id); if (el) el.remove(); }
+  const time = document.createElement('span'); time.className = 'time ytime';
+  time.append($('tcur'), ' / ', $('tdur'));
+  bl.append($('vol'), time);
+  br.append($('qwrap'), $('spd').parentElement, $('fs'));
+  $('q').onclick = e => {
+    e.stopPropagation(); $('spdmenu').classList.remove('open');
+    if ($('qmenu').classList.toggle('open')) openQMenu();
+  };
+  v.addEventListener('loadedmetadata', paintQuality);
+  v.addEventListener('emptied', paintQuality);
+  paintQuality();
 }
 
 v.volume = store.get('volume', 1); v.muted = MUTED || store.get('muted', false);

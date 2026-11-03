@@ -207,10 +207,15 @@ type PlayInfo struct {
 	UserAgent  string
 	// Width and Height of the picture, when the API tells them.
 	Width, Height int
+	// Qualities are the episode's resolutions, as the shorter side in
+	// pixels, highest first.
+	Qualities []int
 }
 
-// ResolvePlay asks the app API for an episode's media.
-func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
+// ResolvePlay asks the app API for an episode's media, of the highest
+// resolution up to maxPx (the shorter side in pixels; 0 for any), or of
+// the lowest when every one is higher.
+func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) {
 	if !vidPattern.MatchString(vid) {
 		return nil, errors.New("分集编号无效")
 	}
@@ -332,6 +337,29 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 		}
 		return cands[i].rank < cands[j].rank
 	})
+	var qualities []int
+	for _, c := range cands {
+		if c.pixels > 0 && (len(qualities) == 0 || qualities[len(qualities)-1] != c.pixels) {
+			qualities = append(qualities, c.pixels)
+		}
+	}
+	if maxPx > 0 {
+		var fit []cand
+		for _, c := range cands {
+			if c.pixels <= maxPx {
+				fit = append(fit, c)
+			}
+		}
+		if len(fit) == 0 { // all higher: the lowest
+			low := cands[len(cands)-1].pixels
+			for _, c := range cands {
+				if c.pixels == low {
+					fit = append(fit, c)
+				}
+			}
+		}
+		cands = fit
+	}
 	var lastErr error
 	for _, c := range cands {
 		spade := firstNonEmpty(c.item.SpadeA, c.item.EncryptInfo.SpadeA)
@@ -372,7 +400,7 @@ func ResolvePlay(ctx context.Context, vid string) (*PlayInfo, error) {
 			if c.pixels > 0 {
 				quality = strconv.Itoa(c.pixels) + "P"
 			}
-			return &PlayInfo{VID: vid, URL: media, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h}, nil
+			return &PlayInfo{VID: vid, URL: media, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h, Qualities: qualities}, nil
 		}
 	}
 	if lastErr == nil {
