@@ -23,7 +23,7 @@ const (
 	webUA      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
-var httpClient = &http.Client{Timeout: 20 * time.Second}
+var httpClient = &http.Client{Timeout: 20 * time.Second, Transport: directTransport()}
 
 // Series is one drama in a list.
 type Series struct {

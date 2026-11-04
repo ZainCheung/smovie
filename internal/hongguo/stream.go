@@ -45,8 +45,7 @@ func Download(ctx context.Context, info *PlayInfo, dst string, progress func(Pro
 		return err
 	}
 	req.Header.Set("User-Agent", info.UserAgent)
-	client := &http.Client{} // no overall timeout: media can be large
-	res, err := client.Do(req)
+	res, err := mediaClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("视频下载失败：%w", err)
 	}
