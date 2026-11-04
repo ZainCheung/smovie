@@ -34,6 +34,8 @@ type episodeInfo struct {
 	Start    float64 `json:"start,omitempty"` // seconds to pick up at
 	// HoldLock is the setting: a held key locks 2x after 3 seconds.
 	HoldLock bool `json:"holdLock,omitempty"`
+	// AutoNext is the setting: an episode that ends goes on to the next.
+	AutoNext bool `json:"autoNext,omitempty"`
 }
 
 // playerEvents is what the player page tells the app.
@@ -276,10 +278,10 @@ func (s *mediaServer) setCurrent(info episodeInfo) {
 	s.mu.Unlock()
 }
 
-// setHoldLock changes the setting the page reads with the episode.
-func (s *mediaServer) setHoldLock(on bool) {
+// setPrefs changes the settings the page reads with the episode.
+func (s *mediaServer) setPrefs(holdLock, autoNext bool) {
 	s.mu.Lock()
-	s.current.HoldLock = on
+	s.current.HoldLock, s.current.AutoNext = holdLock, autoNext
 	s.mu.Unlock()
 }
 
@@ -416,6 +418,9 @@ const playerHTML = `<!doctype html>
 html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
   font-family:-apple-system,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;-webkit-user-select:none;user-select:none}
 video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;outline:none}
+/* the last frame of an episode, held while the next one starts */
+#freeze{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;opacity:0;will-change:opacity}
+#freeze.show{opacity:1}
 button{font:inherit;color:inherit;border:0;cursor:pointer}
 .side{position:fixed;top:50%;width:48px;height:72px;margin-top:-56px;border-radius:12px;
   background:rgba(0,0,0,.42);-webkit-backdrop-filter:blur(14px) saturate(1.4);display:flex;flex-direction:column;
@@ -535,6 +540,7 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
 </style></head>
 <body>
 <video id="v" controls playsinline preload="auto"></video>
+<canvas id="freeze"></canvas>
 <button class="side" id="prev" title="上一集 (Shift+←)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg><span>上一集</span></button>
 <button class="side" id="next" title="下一集 (Shift+→)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg><span>下一集</span></button>
 <div id="dm"></div>
@@ -619,15 +625,60 @@ function load(info) {
   hold.lockable = !!info.holdLock;
   if (cur && cur.key === info.key && v.getAttribute('src')) { cur = info; refreshNav(); return; }
   if (!cur || cur.vid !== info.vid) { quals = []; switching = null; dmLoad(info); }
+  // Going on from the episode that ended: its last frame stays until this
+  // one's first, with no controls, and the loading screen only if it is
+  // slow to come.
+  const seamless = advancing && cur && info.ep === cur.ep + 1;
+  if (!seamless) unfreeze();
   cur = info; sent = false; const my = ++token;
-  v.pause(); v.removeAttribute('src'); v.load();
   $('ltitle').textContent = '第 ' + info.ep + ' 集';
   $('lsub').textContent = switching ? '正在切换至 ' + switching.label + '…' : '正在获取片源…';
   $('lprog').hidden = true;
-  show('error', false); show('ended', false); show('loading', true);
+  show('error', false); show('ended', false);
   refreshNav(); setMetadata(info);
-  poll(my);
+  clearTimeout(loadingTimer);
+  const go = () => {
+    if (my !== token) return;
+    v.pause(); v.removeAttribute('src'); v.load();
+    if (seamless) loadingTimer = setTimeout(() => { if (my === token && !v.getAttribute('src')) { unfreeze(); show('loading', true); } }, 600);
+    else show('loading', true);
+    poll(my);
+  };
+  // The frozen frame must be on the screen before the video lets go of
+  // its own, or its black shows between them.
+  if (seamless) frozen.then(go); else go();
 }
+// --- going on to the next episode without a seam ---
+let advancing = false, loadingTimer = 0, frozen = Promise.resolve();
+const frames = n => new Promise(r => { const f = () => (--n <= 0 ? r() : requestAnimationFrame(f)); requestAnimationFrame(f); });
+const freezeEl = $('freeze');
+// freeze draws the frame showing over the video, as the video shows it.
+function freeze() {
+  if (!v.videoWidth) return false;
+  const dpr = devicePixelRatio || 1, W = innerWidth, H = innerHeight;
+  freezeEl.width = Math.round(W * dpr); freezeEl.height = Math.round(H * dpr);
+  const g = freezeEl.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, freezeEl.width, freezeEl.height);
+  const s = Math.min(W / v.videoWidth, H / v.videoHeight), w = v.videoWidth * s, h = v.videoHeight * s;
+  try { g.drawImage(v, (W - w) / 2 * dpr, (H - h) / 2 * dpr, w * dpr, h * dpr); } catch (_) { return false; }
+  freezeEl.classList.add('show');
+  frozen = frames(3);
+  return true;
+}
+function unfreeze() { advancing = false; freezeEl.classList.remove('show'); clearTimeout(loadingTimer); }
+// The next episode takes the frozen frame's place once it shows. WebKit
+// tells of a frame a frame before the screen has the new video's layer,
+// which would show its black for that frame: wait for a few.
+const SHOWN_AFTER = 3;
+function firstFrame() {
+  if (!advancing) return;
+  if (!v.requestVideoFrameCallback) { setTimeout(unfreeze, 150); return; }
+  let n = 0;
+  const tick = () => { if (!advancing) return; if (++n >= SHOWN_AFTER) unfreeze(); else v.requestVideoFrameCallback(tick); };
+  v.requestVideoFrameCallback(tick);
+}
+v.addEventListener('playing', firstFrame);
+addEventListener('resize', () => { if (advancing) unfreeze(); });
 async function poll(my) {
   if (my !== token) return;
   let st;
@@ -800,7 +851,7 @@ window.smovie = { load, pause: () => { hold.paused = false; holdEnd(true); v.pau
   fullScreen: on => document.body.classList.toggle('full', !!on) };
 
 // --- playback ---
-v.addEventListener('play', () => { show('ended', false); wake(); });
+v.addEventListener('play', () => { show('ended', false); if (!advancing) wake(); });
 v.addEventListener('volumechange', () => { if (!MUTED) { store.set('volume', v.volume); store.set('muted', v.muted); } });
 v.addEventListener('ratechange', () => { if (v.readyState && !hold.on) store.set('speed', v.playbackRate); });
 v.addEventListener('loadedmetadata', () => {
@@ -810,13 +861,29 @@ v.addEventListener('loadedmetadata', () => {
   if (cur && v.videoWidth) post('/meta?v=' + cur.vid + '&w=' + v.videoWidth + '&h=' + v.videoHeight);
 });
 v.addEventListener('timeupdate', () => { if (!v.paused && Date.now() - lastReport > 5000) report(false); });
+const goesOn = () => cur && cur.autoNext && hasNext();
 v.addEventListener('ended', () => {
   report(true);
-  $('endtitle').textContent = hasNext() ? '第 ' + cur.ep + ' 集已播完' : '全剧终';
-  show('ended', true);
+  if (goesOn()) {
+    // On to the next with no screen between: the app plays it, and the
+    // page holds this frame until it shows.
+    advancing = freeze();
+    document.body.classList.remove('active'); clearTimeout(idleTimer);
+    post('/step?v=' + cur.vid + '&to=ended');
+    // Should the app not go on, as when the setting just changed, say so.
+    const my = token;
+    setTimeout(() => { if (my === token) { unfreeze(); endScreen(); } }, 3000);
+    return;
+  }
+  endScreen();
   if (hasNext()) post('/step?v=' + cur.vid + '&to=ended');
 });
-v.addEventListener('error', () => { if (v.getAttribute('src')) { $('emsg').textContent = '视频无法解码，请重试'; show('error', true); } });
+function endScreen() {
+  $('endtitle').textContent = hasNext() ? '第 ' + cur.ep + ' 集已播完' : '全剧终';
+  show('ended', true);
+  wake();
+}
+v.addEventListener('error', () => { if (v.getAttribute('src')) { unfreeze(); $('emsg').textContent = '视频无法解码，请重试'; show('error', true); } });
 v.addEventListener('dblclick', e => { e.preventDefault(); toggleFS(); });
 
 $('prev').onclick = () => step('prev');
@@ -836,7 +903,11 @@ let overBar = false;
 const busy = () => overBar || document.querySelector('.track.drag') || document.querySelector('.menu.open');
 ['mousemove', 'mousedown'].forEach(e => document.addEventListener(e, wake));
 document.addEventListener('mouseleave', () => { if (!v.paused && !busy()) document.body.classList.remove('active'); });
-v.addEventListener('pause', () => { if (!v.ended) report(false); clearTimeout(idleTimer); document.body.classList.add('active'); });
+v.addEventListener('pause', () => {
+  if (!v.ended) report(false);
+  if (advancing || (v.ended && goesOn())) return; // going on: no controls
+  clearTimeout(idleTimer); document.body.classList.add('active');
+});
 
 // --- keys, from the page, or from the app while its own UI has the focus ---
 const SPEEDS = [0.75, 1, 1.25, 1.5, 2, 3];
@@ -994,6 +1065,7 @@ document.addEventListener('keyup', e => {
 window.addEventListener('blur', () => holdEnd());
 document.addEventListener('visibilitychange', () => holdEnd());
 // The setting, as it changes: off ends a lock now.
+window.smovie.autoNext = on => { if (cur) cur.autoNext = !!on; };
 window.smovie.holdLock = on => { hold.lockable = !!on; if (!on) holdEnd(true); };
 window.smovie.key = k => {
   if (hold.locked) {

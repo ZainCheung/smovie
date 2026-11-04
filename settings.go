@@ -79,9 +79,10 @@ func (a *app) syncSettings() {
 	if cur == a.saved {
 		return
 	}
-	if cur.HoldLock != a.saved.HoldLock {
-		a.server.setHoldLock(cur.HoldLock)
+	if cur.HoldLock != a.saved.HoldLock || cur.AutoNext != a.saved.AutoNext {
+		a.server.setPrefs(cur.HoldLock, cur.AutoNext)
 		a.tellPlayer("smovie.holdLock", cur.HoldLock)
+		a.tellPlayer("smovie.autoNext", cur.AutoNext)
 	}
 	if cur.VideoCache != a.saved.VideoCache {
 		a.lib.setLimit(videoCacheSizes[cur.VideoCache])
