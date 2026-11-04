@@ -409,7 +409,7 @@ func (a *app) playAt(index int, start float64) {
 	saveHistory(append([]watched(nil), a.history...))
 	j := a.lib.ensure(key)
 	a.job = j
-	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start, HoldLock: a.holdLock}
+	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start, HoldLock: a.holdLock, AutoNext: a.autoNext}
 	a.lib.setPlaying(key)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
