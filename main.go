@@ -398,18 +398,14 @@ func (a *app) playAt(index int, start float64) {
 	a.epRange = index / epBlock
 	vid := a.detail.VIDs[index]
 	key := a.mediaKey(vid)
-	total := len(a.detail.VIDs)
 	if start < 0 {
-		start = 0
-		if w, ok := a.watchOf(a.detail.ID); ok && !w.Finished {
-			start = w.resumeAt(index)
-		}
+		start = a.resumeAt(index)
 	}
-	a.history = recordWatch(a.history, a.detail.Series, index, total)
+	a.history = recordWatch(a.history, a.detail.Series, index, len(a.detail.VIDs))
 	saveHistory(append([]watched(nil), a.history...))
 	j := a.lib.ensure(key)
 	a.job = j
-	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start, HoldLock: a.holdLock, AutoNext: a.autoNext}
+	info := a.episode(index, start)
 	a.lib.setPlaying(key)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)
@@ -421,12 +417,37 @@ func (a *app) playAt(index int, start float64) {
 			if seq != a.playSeq || j.err != nil {
 				return
 			}
-			// Prefetch the next episode so continuous play does not wait.
-			if next := index + 1; a.detail != nil && next < len(a.detail.VIDs) {
-				a.lib.ensure(a.mediaKey(a.detail.VIDs[next]))
+			// Prefetch the next episode so continuous play does not wait,
+			// and have the player open it.
+			next := index + 1
+			if a.detail == nil || next >= len(a.detail.VIDs) {
+				return
 			}
+			n := a.lib.ensure(a.mediaKey(a.detail.VIDs[next]))
+			go func() {
+				<-n.done
+				a.win.Update(func() {
+					if seq == a.playSeq && n.err == nil && a.detail != nil {
+						a.tellPlayer("smovie.preroll", a.episode(next, a.resumeAt(next)))
+					}
+				})
+			}()
 		})
 	}()
+}
+
+// resumeAt is where the user left the episode index.
+func (a *app) resumeAt(index int) float64 {
+	if w, ok := a.watchOf(a.detail.ID); ok && !w.Finished {
+		return w.resumeAt(index)
+	}
+	return 0
+}
+
+// episode tells the player about the episode index, to play from start.
+func (a *app) episode(index int, start float64) episodeInfo {
+	vid := a.detail.VIDs[index]
+	return episodeInfo{VID: vid, Key: a.mediaKey(vid), SeriesID: a.detail.ID, Ep: index + 1, Total: len(a.detail.VIDs), Title: a.detail.Title, Poster: a.detail.Cover, Start: start, HoldLock: a.holdLock, AutoNext: a.autoNext}
 }
 
 // tellPlayer calls a function of the player page with a JSON argument.

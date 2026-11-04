@@ -418,6 +418,11 @@ const playerHTML = `<!doctype html>
 html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
   font-family:-apple-system,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;-webkit-user-select:none;user-select:none}
 video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;outline:none}
+/* The two <video>s: one plays, the other holds the next episode, unseen.
+   Their order stays, as moving a video's layer stalls it: the upper one
+   only shows or doesn't. */
+#v2{opacity:0;will-change:opacity;pointer-events:none}
+#v2.shown{opacity:1;pointer-events:auto}
 /* the last frame of an episode, held while the next one starts */
 #freeze{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;opacity:0;will-change:opacity}
 #freeze.show{opacity:1}
@@ -540,6 +545,7 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
 </style></head>
 <body>
 <video id="v" controls playsinline preload="auto"></video>
+<video id="v2" playsinline preload="auto"></video>
 <canvas id="freeze"></canvas>
 <button class="side" id="prev" title="上一集 (Shift+←)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg><span>上一集</span></button>
 <button class="side" id="next" title="下一集 (Shift+→)"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg><span>下一集</span></button>
@@ -579,7 +585,11 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
 <div id="hold">2x 快进中 <i>▶▶</i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
 <script>
 const $ = id => document.getElementById(id);
-const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}}, YT = CUSTOM && '{{LAYOUT}}' === 'yt';
+// v is the <video> that plays. The other holds the next episode, ready:
+// see takeSpare. onV listens to whichever plays.
+let v = $('v');
+const onV = (type, fn) => { for (const el of [$('v'), $('v2')]) el.addEventListener(type, e => { if (e.target === v) fn(e); }); };
+const MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}}, YT = CUSTOM && '{{LAYOUT}}' === 'yt';
 let cur = null, token = 0, sent = false;
 let quals = [], switching = null; // the episode's resolutions; the quality being switched to
 let lastReport = 0;
@@ -624,6 +634,11 @@ function load(info) {
   info.key = info.key || info.vid;
   hold.lockable = !!info.holdLock;
   if (cur && cur.key === info.key && v.getAttribute('src')) { cur = info; refreshNav(); return; }
+  if (lift) lift();
+  if (retire) retire();
+  queued = null;
+  if (spareFits(info)) { takeSpare(info); return; }
+  dropSpare();
   if (!cur || cur.vid !== info.vid) { quals = []; switching = null; dmLoad(info); }
   // Going on from the episode that ended: its last frame stays until this
   // one's first, with no controls, and the loading screen only if it is
@@ -677,8 +692,87 @@ function firstFrame() {
   const tick = () => { if (!advancing) return; if (++n >= SHOWN_AFTER) unfreeze(); else v.requestVideoFrameCallback(tick); };
   v.requestVideoFrameCallback(tick);
 }
-v.addEventListener('playing', firstFrame);
+onV('playing', firstFrame);
 addEventListener('resize', () => { if (advancing) unfreeze(); });
+// --- the next episode, ready before it is needed ---
+// A <video> takes a quarter of a second to open a file, however near the
+// file is. So the next episode opens ahead of time in a second <video>,
+// under the first, and going on to it only starts it.
+const spare = {el: $('v2'), info: null};
+let lift = null, retire = null, queued = null;
+function preroll(info) {
+  if (lift || retire) { queued = info; return; }
+  if (!info || !info.key || (cur && cur.key === info.key) || (spare.info && spare.info.key === info.key)) return;
+  dropSpare();
+  if (info.start > 3) return; // it picks up mid-episode: a seek is no faster than a load
+  spare.info = info;
+  spare.el.src = '/media/' + info.key + '.mp4';
+  spare.el.load();
+}
+function dropSpare() {
+  spare.info = null;
+  if (!spare.el.getAttribute('src')) return;
+  spare.el.pause(); spare.el.removeAttribute('src'); spare.el.load();
+}
+// A <video> alone in the system's full screen, or in picture in picture,
+// can't hand that over to the other.
+const spareFits = info => spare.info && spare.info.key === info.key && spare.el.readyState >= 3
+  && !document.pictureInPictureElement && fsEl() !== v;
+// takeSpare makes the spare the <video> that plays. The old one shows until
+// the spare has a frame, and plays on, unseen: stopping a <video> stalls
+// one that is starting, by some 300 ms in WebKit. When ending, it is heard
+// to its end; otherwise it falls silent now.
+function takeSpare(info, ending) {
+  const old = v, next = spare.el;
+  next.muted = old.muted; next.volume = old.volume;
+  next.playbackRate = hold.on ? HOLD_RATE : store.get('speed', 1);
+  if (!CUSTOM) { old.controls = false; next.controls = true; }
+  if (!ending) old.volume = 0;
+  v = next; spare.el = old; spare.info = null;
+  clearTimeout(loadingTimer);
+  quals = []; switching = null;
+  cur = info; sent = false; token++;
+  advancing = true; // no controls until it shows: firstFrame
+  show('loading', false); show('error', false); show('ended', false);
+  dmLoad(info); refreshNav(); setMetadata(info);
+  v.dispatchEvent(new Event('loadedmetadata')); // it had that as the spare: its rate, size and controls
+  v.play().catch(() => {});
+  let timer = 0;
+  lift = () => {
+    lift = null; clearTimeout(timer);
+    $('v2').classList.toggle('shown', next === $('v2'));
+    const later = setTimeout(() => retire && retire(), 1000);
+    retire = () => {
+      retire = null; clearTimeout(later);
+      old.pause(); old.removeAttribute('src'); old.load();
+      if (queued) { const q = queued; queued = null; preroll(q); }
+    };
+  };
+  const mine = lift, done = () => { if (lift === mine) lift(); };
+  timer = setTimeout(done, 800);
+  if (next.requestVideoFrameCallback) next.requestVideoFrameCallback(done);
+}
+// Even a ready <video> shows its first frame, and has its sound, some 340 ms
+// after play(). So the next episode starts that much before this one ends,
+// and takes over from this one's last frame.
+const LEAD = 0.34;
+const nextReady = () => { const n = spare.info; return n && n.ep === cur.ep + 1 && goesOn() && spareFits(n) ? n : null; };
+function goOn(next, ending) {
+  report(true);
+  document.body.classList.remove('active'); clearTimeout(idleTimer);
+  post('/step?v=' + cur.vid + '&to=ended'); // the app follows
+  takeSpare(next, ending);
+}
+const secondsLeft = () => (v.duration - v.currentTime) / v.playbackRate;
+let leadTimer = 0;
+onV('timeupdate', () => {
+  if (leadTimer || v.paused || !v.duration || !cur || secondsLeft() > LEAD + 0.35 || !nextReady()) return;
+  leadTimer = setTimeout(() => {
+    leadTimer = 0;
+    const next = nextReady();
+    if (next && !v.paused && !v.seeking && secondsLeft() < LEAD + 0.1) goOn(next, true);
+  }, Math.max(0, secondsLeft() - LEAD) * 1000);
+});
 async function poll(my) {
   if (my !== token) return;
   let st;
@@ -832,11 +926,11 @@ function dmTick() {
   }
 }
 requestAnimationFrame(dmTick);
-v.addEventListener('seeking', dmSeek);
-v.addEventListener('emptied', dmClear);
-v.addEventListener('pause', () => { for (const a of dm.live) a.pause(); });
-v.addEventListener('play', () => { for (const a of dm.live) a.play(); });
-v.addEventListener('ratechange', () => { for (const a of dm.live) a.playbackRate = v.playbackRate; });
+onV('seeking', dmSeek);
+onV('emptied', dmClear);
+onV('pause', () => { for (const a of dm.live) a.pause(); });
+onV('play', () => { for (const a of dm.live) a.play(); });
+onV('ratechange', () => { for (const a of dm.live) a.playbackRate = v.playbackRate; });
 addEventListener('resize', dmSeek);
 function dmToggle() {
   dm.on = !dm.on; store.set('danmaku', dm.on);
@@ -851,24 +945,26 @@ window.smovie = { load, pause: () => { hold.paused = false; holdEnd(true); v.pau
   fullScreen: on => document.body.classList.toggle('full', !!on) };
 
 // --- playback ---
-v.addEventListener('play', () => { show('ended', false); if (!advancing) wake(); });
-v.addEventListener('volumechange', () => { if (!MUTED) { store.set('volume', v.volume); store.set('muted', v.muted); } });
-v.addEventListener('ratechange', () => { if (v.readyState && !hold.on) store.set('speed', v.playbackRate); });
-v.addEventListener('loadedmetadata', () => {
+onV('play', () => { show('ended', false); if (!advancing) wake(); });
+onV('volumechange', () => { if (!MUTED) { store.set('volume', v.volume); store.set('muted', v.muted); } });
+onV('ratechange', () => { if (v.readyState && !hold.on) store.set('speed', v.playbackRate); });
+onV('loadedmetadata', () => {
   v.playbackRate = hold.on ? HOLD_RATE : store.get('speed', 1);
   if (switching) { v.currentTime = Math.min(switching.t, Math.max(0, v.duration - 1)); toast('已切换至 ' + switching.label); switching = null; }
   else if (cur && cur.start > 3 && cur.start < v.duration - 5) { v.currentTime = cur.start; toast('从 ' + clock(cur.start) + ' 继续播放'); }
   if (cur && v.videoWidth) post('/meta?v=' + cur.vid + '&w=' + v.videoWidth + '&h=' + v.videoHeight);
 });
-v.addEventListener('timeupdate', () => { if (!v.paused && Date.now() - lastReport > 5000) report(false); });
+onV('timeupdate', () => { if (!v.paused && Date.now() - lastReport > 5000) report(false); });
 const goesOn = () => cur && cur.autoNext && hasNext();
-v.addEventListener('ended', () => {
+onV('ended', () => {
+  const next = nextReady();
+  if (next) return goOn(next, true);
   report(true);
   if (goesOn()) {
+    document.body.classList.remove('active'); clearTimeout(idleTimer);
     // On to the next with no screen between: the app plays it, and the
     // page holds this frame until it shows.
     advancing = freeze();
-    document.body.classList.remove('active'); clearTimeout(idleTimer);
     post('/step?v=' + cur.vid + '&to=ended');
     // Should the app not go on, as when the setting just changed, say so.
     const my = token;
@@ -883,8 +979,8 @@ function endScreen() {
   show('ended', true);
   wake();
 }
-v.addEventListener('error', () => { if (v.getAttribute('src')) { unfreeze(); $('emsg').textContent = '视频无法解码，请重试'; show('error', true); } });
-v.addEventListener('dblclick', e => { e.preventDefault(); toggleFS(); });
+onV('error', () => { if (v.getAttribute('src')) { unfreeze(); $('emsg').textContent = '视频无法解码，请重试'; show('error', true); } });
+onV('dblclick', e => { e.preventDefault(); toggleFS(); });
 
 $('prev').onclick = () => step('prev');
 $('next').onclick = $('endnext').onclick = () => step('next');
@@ -903,7 +999,7 @@ let overBar = false;
 const busy = () => overBar || document.querySelector('.track.drag') || document.querySelector('.menu.open');
 ['mousemove', 'mousedown'].forEach(e => document.addEventListener(e, wake));
 document.addEventListener('mouseleave', () => { if (!v.paused && !busy()) document.body.classList.remove('active'); });
-v.addEventListener('pause', () => {
+onV('pause', () => {
   if (!v.ended) report(false);
   if (advancing || (v.ended && goesOn())) return; // going on: no controls
   clearTimeout(idleTimer); document.body.classList.add('active');
@@ -993,7 +1089,7 @@ function holdEnd(force) {
   if (hold.paused && !wasLocked) v.pause();
 }
 // A speed chosen meanwhile, as from the menu, ends it where it is.
-v.addEventListener('ratechange', () => {
+onV('ratechange', () => {
   if (!hold.on || !v.readyState || v.playbackRate === HOLD_RATE) return; // a new episode's load resets it
   holdReset();
   store.set('speed', v.playbackRate);
@@ -1066,6 +1162,7 @@ window.addEventListener('blur', () => holdEnd());
 document.addEventListener('visibilitychange', () => holdEnd());
 // The setting, as it changes: off ends a lock now.
 window.smovie.autoNext = on => { if (cur) cur.autoNext = !!on; };
+window.smovie.preroll = preroll;
 window.smovie.holdLock = on => { hold.lockable = !!on; if (!on) holdEnd(true); };
 window.smovie.key = k => {
   if (hold.locked) {
@@ -1161,12 +1258,12 @@ function setupControls() {
     f => hms(f * (v.duration || 0)));
   slider($('volbar'), f => { v.muted = false; v.volume = Math.round(f * 100) / 100; });
   // A click on the picture plays or pauses; a double click is full screen.
-  v.addEventListener('click', togglePlay);
-  ['timeupdate', 'durationchange', 'progress', 'seeked', 'emptied', 'loadedmetadata'].forEach(e => v.addEventListener(e, paintTime));
-  v.addEventListener('volumechange', paintVolume);
-  v.addEventListener('ratechange', paintSpeed);
+  onV('click', togglePlay);
+  ['timeupdate', 'durationchange', 'progress', 'seeked', 'emptied', 'loadedmetadata'].forEach(e => onV(e, paintTime));
+  onV('volumechange', paintVolume);
+  onV('ratechange', paintSpeed);
   const playing = () => document.body.classList.toggle('playing', !v.paused);
-  v.addEventListener('play', playing); v.addEventListener('pause', playing);
+  onV('play', playing); onV('pause', playing);
   const nav = refreshNav;
   refreshNav = () => { nav(); if ($('cprev')) { $('cprev').disabled = !hasPrev(); $('cnext').disabled = !hasNext(); } };
   paintTime(); paintVolume(); paintSpeed(); refreshNav();
@@ -1225,8 +1322,8 @@ function setupYT() {
     e.stopPropagation(); $('spdmenu').classList.remove('open');
     if ($('qmenu').classList.toggle('open')) openQMenu();
   };
-  v.addEventListener('loadedmetadata', paintQuality);
-  v.addEventListener('emptied', paintQuality);
+  onV('loadedmetadata', paintQuality);
+  onV('emptied', paintQuality);
   paintQuality();
 }
 
