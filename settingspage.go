@@ -15,6 +15,9 @@ func (a *app) settingsPage(c *ui.Context) {
 			settingRow(c, "自动连播", "一集播完后自动播放下一集", func() {
 				ui.Switch(c.Key("auto"), &a.autoNext).Label("自动连播")
 			})
+			settingRow(c, "长按锁定倍速", "按住 → 或空格 3 秒后保持 2x 倍速，按任意键退出", func() {
+				ui.Switch(c.Key("hold-lock"), &a.holdLock).Label("长按锁定倍速")
+			})
 		})
 
 		section(c, "存储", func() {
