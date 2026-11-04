@@ -89,6 +89,7 @@ type app struct {
 	playSeq   int
 	aspects   map[string]float32 // width over height, by episode
 	autoNext  bool
+	holdLock  bool
 	epRange   int // which block of 50 episodes the list shows
 
 	// What the site tells of series and episodes, by ID, for the watch
@@ -135,6 +136,7 @@ func newApp() *app {
 		infos:        map[string]*loaded[hongguo.SeriesInfo]{},
 		epInfos:      map[string]*loaded[hongguo.EpisodeInfo]{},
 		autoNext:     st.AutoNext,
+		holdLock:     st.HoldLock,
 		saved:        st,
 		videoCache:   st.VideoCache,
 		quality:      st.Quality,
@@ -407,7 +409,7 @@ func (a *app) playAt(index int, start float64) {
 	saveHistory(append([]watched(nil), a.history...))
 	j := a.lib.ensure(key)
 	a.job = j
-	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start}
+	info := episodeInfo{VID: vid, Key: key, SeriesID: a.detail.ID, Ep: index + 1, Total: total, Title: a.detail.Title, Poster: a.detail.Cover, Start: start, HoldLock: a.holdLock}
 	a.lib.setPlaying(key)
 	a.server.setCurrent(info)
 	a.tellPlayer("smovie.load", info)

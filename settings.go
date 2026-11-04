@@ -22,6 +22,8 @@ type settings struct {
 	// Quality is the highest resolution to play, the shorter side in
 	// pixels; 0 for the highest there is.
 	Quality int `json:"quality,omitempty"`
+	// HoldLock keeps 2x on once → or space is held 3 seconds, until a key.
+	HoldLock bool `json:"holdLock,omitempty"`
 }
 
 func defaultSettings() settings { return settings{AutoNext: true, VideoCache: defaultVideoCache} }
@@ -73,9 +75,13 @@ func saveSettings(s settings) {
 // syncSettings saves the settings once they changed; the view calls it,
 // as switches change them in place.
 func (a *app) syncSettings() {
-	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality}
+	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality, HoldLock: a.holdLock}
 	if cur == a.saved {
 		return
+	}
+	if cur.HoldLock != a.saved.HoldLock {
+		a.server.setHoldLock(cur.HoldLock)
+		a.tellPlayer("smovie.holdLock", cur.HoldLock)
 	}
 	if cur.VideoCache != a.saved.VideoCache {
 		a.lib.setLimit(videoCacheSizes[cur.VideoCache])

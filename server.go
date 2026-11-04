@@ -32,6 +32,8 @@ type episodeInfo struct {
 	Title    string  `json:"title"`
 	Poster   string  `json:"poster"`
 	Start    float64 `json:"start,omitempty"` // seconds to pick up at
+	// HoldLock is the setting: a held key locks 2x after 3 seconds.
+	HoldLock bool `json:"holdLock,omitempty"`
 }
 
 // playerEvents is what the player page tells the app.
@@ -274,6 +276,13 @@ func (s *mediaServer) setCurrent(info episodeInfo) {
 	s.mu.Unlock()
 }
 
+// setHoldLock changes the setting the page reads with the episode.
+func (s *mediaServer) setHoldLock(on bool) {
+	s.mu.Lock()
+	s.current.HoldLock = on
+	s.mu.Unlock()
+}
+
 // currentKey is the media key of the episode the page shows.
 func (s *mediaServer) currentKey() string {
 	s.mu.Lock()
@@ -433,12 +442,16 @@ body.active .side{opacity:1;pointer-events:auto}
   background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(12px);font-size:14px;font-weight:700;opacity:0;transition:opacity .15s;pointer-events:none}
 #hold.show{opacity:1}
 #hold i{font-style:normal;letter-spacing:-3px;animation:pulse .8s ease-in-out infinite}
+#hold svg{width:14px;height:14px;display:none}
+#hold.locked svg{display:block}
+#hold.locked i{animation:none}
 @keyframes pulse{50%{opacity:.35}}
 /* --- danmaku: comments floating right to left over the top of the picture --- */
 #dm{position:fixed;left:0;right:0;top:0;height:46%;overflow:hidden;pointer-events:none;contain:strict}
 body.nodm #dm{display:none}
 #dm span{position:absolute;left:0;top:0;white-space:nowrap;font-weight:700;line-height:1;will-change:transform;
   text-shadow:0 0 1px #000,0 0 1px #000,0 1px 2px rgba(0,0,0,.8);opacity:.92}
+#dm span b{font-weight:400;font-family:"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;padding:0 .05em;text-shadow:none}
 .dm-off,body.nodm .dm-on{display:none} body.nodm .dm-off{display:block}
 #toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 16px;border-radius:10px;background:rgba(0,0,0,.75);
   font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
@@ -557,7 +570,7 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
     <button class="cb" id="fs" title="全屏 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-enter"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-exit"><path d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4"/></svg></button>
   </div>
 </div>
-<div id="hold">2x 快进中 <i>▶▶</i></div>
+<div id="hold">2x 快进中 <i>▶▶</i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
 <script>
 const $ = id => document.getElementById(id);
 const v = $('v'), MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}}, YT = CUSTOM && '{{LAYOUT}}' === 'yt';
@@ -603,6 +616,7 @@ function setMetadata(info) {
 function load(info) {
   if (!info || !info.vid) return;
   info.key = info.key || info.vid;
+  hold.lockable = !!info.holdLock;
   if (cur && cur.key === info.key && v.getAttribute('src')) { cur = info; refreshNav(); return; }
   if (!cur || cur.vid !== info.vid) { quals = []; switching = null; dmLoad(info); }
   cur = info; sent = false; const my = ++token;
@@ -701,6 +715,31 @@ async function dmLoad(info) {
     $('dmb').title = r.error && !dm.items.length ? '弹幕暂不可用 (D)' : '弹幕 (D)';
   } catch (_) {}
 }
+// The app's emoticons come as text, "[捂脸]", with no picture: each known
+// one shows as the emoji nearest it, and the rest stay as written.
+const DM_EMOJI = {
+  爱慕: '🥰', 偷笑: '🤭', 爽: '😆', 笑哭: '😂', 鼓掌: '👏', 哭: '😢', 大哭: '😭', 流泪: '😢', 泣不成声: '😭',
+  捂脸: '🤦', 没看够: '🥺', 送花: '💐', 玫瑰: '🌹', 笑: '😄', 大笑: '😁', 呲牙: '😁', 憨笑: '😊', 微笑: '🙂',
+  舔屏: '🤤', 快哭了: '🥹', 委屈: '🥺', 可怜: '🥺', 求爆更: '🙏', 抱拳: '🙏', 飞吻: '😘', 亲亲: '😚',
+  送心: '💖', 爱心: '❤️', 比心: '🫶', 心碎: '💔', 尬笑: '😅', 擦汗: '😓', 汗: '😓', 赞: '👍', 强: '💪', 加油: '💪',
+  吃瓜: '🍉', 什么: '😳', 惊讶: '😮', 震惊: '😱', 惊恐: '😱', 石化: '🗿', 做鬼脸: '😜', 鬼脸: '😜', 调皮: '😛',
+  吐舌: '😛', 色: '😍', 害羞: '☺️', 坏笑: '😏', 奸笑: '😏', 得意: '😏', 酷拽: '😎', 机智: '🤓', 思考: '🤔',
+  疑问: '❓', 白眼: '🙄', 鄙视: '😒', 无语: '😑', 发呆: '😶', 撇嘴: '😕', 难过: '😞', 衰: '😓', 晕: '😵',
+  生气: '😠', 发怒: '😡', 吐: '🤮', 睡: '😴', 困: '🥱', 哈欠: '🥱', 闭嘴: '🤐', 嘘: '🤫', 抱抱: '🤗',
+  胜利: '✌️', OK: '👌', 握手: '🤝', 拳头: '👊', 再见: '👋', 庆祝: '🎉', 礼物: '🎁', 红包: '🧧', 火: '🔥',
+  骷髅: '💀', 灵机一动: '💡', 不看: '🙈', 打脸: '🤕',
+};
+function dmFill(el, text) {
+  let last = 0;
+  for (const m of text.matchAll(/\[([^\[\]]{1,6})\]/g)) {
+    const e = DM_EMOJI[m[1]];
+    if (!e) continue;
+    if (m.index > last) el.append(text.slice(last, m.index));
+    const b = document.createElement('b'); b.textContent = e; el.append(b);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) el.append(text.slice(last));
+}
 function dmSize() { const h = innerHeight; return Math.round(Math.max(14, Math.min(26, h / 26))); }
 function dmShoot(item) {
   // The API repeats a comment at nearly the same time: show it once.
@@ -712,7 +751,7 @@ function dmShoot(item) {
   const lanes = Math.max(1, Math.floor(dmLayer.clientHeight / laneH));
   if (dm.live.size >= 80) return;
   const el = document.createElement('span');
-  el.textContent = item.text; el.style.fontSize = size + 'px'; el.style.color = item.color || '#fff';
+  dmFill(el, item.text); el.style.fontSize = size + 'px'; el.style.color = item.color || '#fff';
   dmLayer.appendChild(el);
   const w = el.offsetWidth, now = v.currentTime, speed = (W + w) / DM_SECONDS;
   let lane = -1;
@@ -757,7 +796,7 @@ function dmToggle() {
 document.body.classList.toggle('nodm', !dm.on);
 $('dmb').onclick = dmToggle;
 
-window.smovie = { load, pause: () => { holdEnd(); v.pause(); }, exitFullScreen: exitFS,
+window.smovie = { load, pause: () => { hold.paused = false; holdEnd(true); v.pause(); }, exitFullScreen: exitFS,
   fullScreen: on => document.body.classList.toggle('full', !!on) };
 
 // --- playback ---
@@ -834,46 +873,137 @@ function key(k, shift) {
   else return false;
   wake(); return true;
 }
-// Holding → plays at 2x until it is let go, as video apps have it; a
-// tap still skips 5 seconds. The OS repeats a held key: a repeat with no
-// press seen, as when the app's own UI took the press, starts it too.
-const HOLD_RATE = 2, HOLD_DELAY = 300;
-const hold = { on: false, timer: 0, rate: 1 };
+// Holding → or space plays at 2x until it is let go, as video apps have
+// it, and leaves playback as it was: a paused video plays while held and
+// pauses again. A tap still skips 5 seconds, or plays and pauses, once
+// let go. With the setting on, held 3 seconds it locks: 2x stays once
+// let go, until any key is pressed.
+//
+// Keys come from the page, or from the app while its own UI has the
+// keyboard: the app sees no release, so one of its presses waits for the
+// page's release (the page has the keyboard from then on), or for its
+// own repeats, which while they come mean the key is still held.
+const HOLD_RATE = 2, HOLD_DELAY = 300, LOCK_AFTER = 3000;
+const APP_TAP = 700;   // ms with no release nor repeat: the app's press was a tap
+const APP_GONE = 250;  // ms with no repeat from the app: let go
+const hold = { on: false, locked: false, lockable: false, key: '', timer: 0, lockTimer: 0, since: 0,
+  rate: 1, paused: false, app: false, appTimer: 0, appLast: 0 };
+const HOLD_KEYS = { ArrowRight: () => seek(5), ' ': () => key(' ', false) };
 function holdStart() {
   clearTimeout(hold.timer); hold.timer = 0;
   if (hold.on || !v.getAttribute('src')) return;
-  hold.on = true; hold.rate = v.playbackRate;
+  hold.on = true; hold.rate = v.playbackRate; hold.paused = v.paused;
   v.playbackRate = HOLD_RATE;
   if (v.paused) v.play().catch(() => {});
   $('hold').classList.add('show'); wake();
+  if (hold.lockable) hold.lockTimer = setTimeout(holdLock, Math.max(0, LOCK_AFTER - (Date.now() - hold.since)));
 }
-function holdEnd() {
+function holdLock() {
+  hold.lockTimer = 0;
+  if (!hold.on || hold.locked) return;
+  hold.locked = true;
+  $('hold').classList.add('locked');
+  toast('已锁定 2x 倍速，按任意键退出');
+}
+function holdReset() {
+  clearTimeout(hold.timer); clearTimeout(hold.lockTimer); clearTimeout(hold.appTimer);
+  hold.timer = hold.lockTimer = hold.appTimer = 0;
+  hold.on = false; hold.locked = false; hold.key = ''; hold.app = false;
+  $('hold').classList.remove('show', 'locked');
+}
+// holdEnd stops it; a locked one only when forced.
+function holdEnd(force) {
   clearTimeout(hold.timer); hold.timer = 0;
-  if (!hold.on) return;
-  hold.on = false;
+  if (!hold.on) { if (!hold.locked) hold.key = ''; return; }
+  if (hold.locked && !force) return;
+  const wasLocked = hold.locked;
+  holdReset();
   v.playbackRate = store.get('speed', hold.rate);
-  $('hold').classList.remove('show');
+  if (hold.paused && !wasLocked) v.pause();
+}
+// A speed chosen meanwhile, as from the menu, ends it where it is.
+v.addEventListener('ratechange', () => {
+  if (!hold.on || !v.readyState || v.playbackRate === HOLD_RATE) return; // a new episode's load resets it
+  holdReset();
+  store.set('speed', v.playbackRate);
+});
+// unlock takes the key that ends a lock, so that it does nothing else.
+function unlock() {
+  if (!hold.locked) return false;
+  holdEnd(true); toast('已退出倍速锁定'); wake();
+  return true;
+}
+// press is a hold key going down, from the page or (app) the app.
+function press(k, repeat, app) {
+  if (hold.on) {
+    if (k === hold.key && app && hold.app) appHeld();
+    return;
+  }
+  const pending = hold.timer && k === hold.key;
+  if (app) {
+    if (pending && hold.app) { hold.app = true; holdStart(); appHeld(); return; } // the app's repeat: held
+    clearTimeout(hold.timer);
+    hold.key = k; hold.app = true; hold.since = Date.now();
+    hold.timer = setTimeout(() => { hold.timer = 0; hold.key = ''; hold.app = false; HOLD_KEYS[k](); wake(); }, APP_TAP);
+    return;
+  }
+  if (!repeat) {
+    if (pending) return;
+    hold.key = k; hold.app = false; hold.since = Date.now();
+    hold.timer = setTimeout(holdStart, HOLD_DELAY);
+    return;
+  }
+  // A repeat: held, as after a press the app took, whose release the page sees.
+  if (!pending) { hold.key = k; hold.since = Date.now() - HOLD_DELAY; }
+  hold.app = false;
+  holdStart();
+}
+// appHeld notes the app's repeat: with none for a while, the key is up.
+function appHeld() {
+  hold.appLast = Date.now();
+  clearTimeout(hold.appTimer);
+  hold.appTimer = setTimeout(() => { hold.appTimer = 0; if (hold.app) holdEnd(); }, APP_GONE);
+}
+function release(k) {
+  if (k !== hold.key) return;
+  if (hold.timer) { clearTimeout(hold.timer); hold.timer = 0; hold.key = ''; hold.app = false; HOLD_KEYS[k](); wake(); }
+  else holdEnd();
 }
 // In the capture phase, so that the <video>'s own keys don't act twice.
 document.addEventListener('keydown', e => {
+  if (hold.locked) {
+    if (e.repeat && e.key === hold.key) { e.preventDefault(); e.stopPropagation(); return; } // still held from before
+    unlock();
+    if (!(e.metaKey || e.ctrlKey || e.altKey)) { e.preventDefault(); e.stopPropagation(); }
+    return;
+  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === 'ArrowRight' && !e.shiftKey) {
+  if (HOLD_KEYS[e.key] && !e.shiftKey) {
     e.preventDefault(); e.stopPropagation();
-    if (e.repeat) { if (!hold.on) holdStart(); }
-    else if (!hold.timer && !hold.on) hold.timer = setTimeout(holdStart, HOLD_DELAY);
+    press(e.key, e.repeat, false);
     return;
   }
   if (key(e.key, e.shiftKey)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 document.addEventListener('keyup', e => {
-  if (e.key !== 'ArrowRight') return;
+  if (!HOLD_KEYS[e.key]) return;
   e.preventDefault(); e.stopPropagation();
-  if (hold.timer) { clearTimeout(hold.timer); hold.timer = 0; seek(5); wake(); }
-  else holdEnd();
+  if (hold.locked) { if (e.key === hold.key) hold.key = ''; return; }
+  release(e.key);
 }, true);
-window.addEventListener('blur', holdEnd);
-document.addEventListener('visibilitychange', holdEnd);
-window.smovie.key = k => k.startsWith('Shift+') ? key(k.slice(6), true) : key(k, false);
+window.addEventListener('blur', () => holdEnd());
+document.addEventListener('visibilitychange', () => holdEnd());
+// The setting, as it changes: off ends a lock now.
+window.smovie.holdLock = on => { hold.lockable = !!on; if (!on) holdEnd(true); };
+window.smovie.key = k => {
+  if (hold.locked) {
+    // The held key's own repeats, still coming from the app, don't end it.
+    if (k === hold.key && hold.app && Date.now() - hold.appLast < APP_GONE) { hold.appLast = Date.now(); return true; }
+    return unlock();
+  }
+  if (HOLD_KEYS[k]) { press(k, false, true); wake(); return true; }
+  return k.startsWith('Shift+') ? key(k.slice(6), true) : key(k, false);
+};
 
 // --- the custom controls ---
 const pad2 = n => String(n).padStart(2, '0');
