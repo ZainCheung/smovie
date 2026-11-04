@@ -8,6 +8,8 @@ package main
 // window's own capture leaves blank where the web view shows; SIGUSR2
 // runs $SMOVIE_EVAL, or the script in $SMOVIE_EVAL_FILE, in the player page, or pauses it, which then shows its
 // controls. SMOVIE_CONFIG names the directory of the history and settings.
+// SMOVIE_OPEN=<i>:<ep> opens the series at index i of the history, at
+// episode index ep.
 import (
 	"fmt"
 	"os"
@@ -24,6 +26,10 @@ func init() {
 		configOverride = dir
 	}
 	onReady = func(a *app) {
+		var i, ep int
+		if _, err := fmt.Sscanf(os.Getenv("SMOVIE_OPEN"), "%d:%d", &i, &ep); err == nil && i < len(a.history) {
+			a.openAt(a.history[i].Series, ep)
+		}
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGUSR1, syscall.SIGUSR2)
 		go func() {
