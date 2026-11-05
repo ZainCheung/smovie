@@ -24,6 +24,10 @@ type settings struct {
 	Quality int `json:"quality,omitempty"`
 	// HoldLock keeps 2x on once → or space is held 3 seconds, until a key.
 	HoldLock bool `json:"holdLock,omitempty"`
+	// PanelFullScreen is macOS's experiment: the app, not WKWebView, fills
+	// the screen with the player, with the episode's panel beside it.
+	// Windows and Linux always have it.
+	PanelFullScreen bool `json:"panelFullScreen,omitempty"`
 }
 
 func defaultSettings() settings { return settings{AutoNext: true, VideoCache: defaultVideoCache} }
@@ -75,7 +79,7 @@ func saveSettings(s settings) {
 // syncSettings saves the settings once they changed; the view calls it,
 // as switches change them in place.
 func (a *app) syncSettings() {
-	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality, HoldLock: a.holdLock}
+	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality, HoldLock: a.holdLock, PanelFullScreen: a.panelFull}
 	if cur == a.saved {
 		return
 	}
@@ -83,6 +87,10 @@ func (a *app) syncSettings() {
 		a.server.setPrefs(cur.HoldLock, cur.AutoNext)
 		a.tellPlayer("smovie.holdLock", cur.HoldLock)
 		a.tellPlayer("smovie.autoNext", cur.AutoNext)
+	}
+	if cur.PanelFullScreen != a.saved.PanelFullScreen {
+		a.server.hostFS.Store(a.hostFullScreen())
+		a.tellPlayer("smovie.hostFS", a.hostFullScreen())
 	}
 	if cur.VideoCache != a.saved.VideoCache {
 		a.lib.setLimit(videoCacheSizes[cur.VideoCache])

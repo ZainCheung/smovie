@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"smovie/internal/hongguo"
@@ -44,7 +45,7 @@ type playerEvents struct {
 	retry func(vid string)
 	meta  func(vid string, width, height int)
 	// fullScreen asks for the player to fill the screen: "on", "off" or
-	// "toggle".
+	// "toggle"; or "panel" for the panel beside it.
 	fullScreen func(to string)
 	// progress tells where vid is, of its duration, and that it ended.
 	progress func(vid string, pos, dur float64, ended bool)
@@ -63,6 +64,10 @@ type mediaServer struct {
 	base   string
 	lib    *library
 	events playerEvents
+
+	// hostFS is whether the app puts the player in full screen, rather
+	// than the page itself: see app.hostFullScreen.
+	hostFS atomic.Bool
 
 	mu      sync.Mutex
 	current episodeInfo
@@ -138,7 +143,7 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 			muted = "true" // for automated runs
 		}
 		_, _ = strings.NewReplacer("{{MUTED}}", muted,
-			"{{HOST_FS}}", strconv.FormatBool(hostFullScreen),
+			"{{HOST_FS}}", strconv.FormatBool(s.hostFS.Load()),
 			"{{CUSTOM}}", strconv.FormatBool(customControls())).WriteString(w, playerHTML)
 	})
 	mux.HandleFunc("GET /media/{file}", s.media)
@@ -226,7 +231,7 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 	})
 	mux.HandleFunc("POST /fullscreen", func(w http.ResponseWriter, r *http.Request) {
 		switch to := r.URL.Query().Get("to"); to {
-		case "on", "off", "toggle":
+		case "on", "off", "toggle", "panel":
 			s.events.fullScreen(to)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -511,6 +516,16 @@ svg{display:block}
 .fs-exit,body.full .fs-enter{display:none} body.full .fs-exit{display:block}
 .pl-pause,body.playing .pl-play{display:none} body.playing .pl-pause{display:block}
 .vo-off,body.muted .vo-on{display:none} body.muted .vo-off{display:block}
+/* --- the episode's title over the top left in full screen, with the
+   controls; a click opens its panel beside the player --- */
+#ftitle{position:fixed;left:16px;top:16px;max-width:calc(50% - 110px);display:none;padding:9px 16px;border-radius:12px;
+  background:rgba(36,36,38,.62);-webkit-backdrop-filter:blur(24px) saturate(1.8);backdrop-filter:blur(24px) saturate(1.8);
+  box-shadow:0 8px 30px rgba(0,0,0,.35),inset 0 0 0 .5px rgba(255,255,255,.12);
+  font-size:20px;font-weight:700;line-height:1.35;text-align:left;white-space:pre;overflow:hidden;text-overflow:ellipsis;
+  opacity:0;transition:opacity .25s,background .15s;pointer-events:none}
+body.full.hostfs #ftitle:not(:empty){display:block}
+body.full.active #ftitle{opacity:1;pointer-events:auto}
+#ftitle:hover{background:rgba(64,64,66,.78)}
 @media (max-width:420px){ .time{display:none} }
 </style></head>
 <body>
@@ -531,6 +546,7 @@ svg{display:block}
   <div style="display:flex;gap:12px"><button class="pill" id="replay">重播</button><button class="pill primary" id="endnext">下一集</button></div>
 </div>
 <div id="toast"></div>
+<button id="ftitle" title="剧集信息与选集"></button>
 <div id="bar">
   <div class="grp" id="bl">
     <button class="cb big" id="play" title="播放/暂停 (空格)"><svg viewBox="0 0 24 24" fill="currentColor" class="pl-play"><path d="M7 4.8v14.4a1 1 0 0 0 1.5.86l12-7.2a1 1 0 0 0 0-1.72l-12-7.2A1 1 0 0 0 7 4.8z"/></svg><svg viewBox="0 0 24 24" fill="currentColor" class="pl-pause"><rect x="6" y="4.5" width="4" height="15" rx="1.2"/><rect x="14" y="4.5" width="4" height="15" rx="1.2"/></svg></button>
@@ -553,7 +569,8 @@ const $ = id => document.getElementById(id);
 // see takeSpare. onV listens to whichever plays.
 let v = $('v');
 const onV = (type, fn) => { for (const el of [$('v'), $('v2')]) el.addEventListener(type, e => { if (e.target === v) fn(e); }); };
-const MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}};
+const MUTED = {{MUTED}}, CUSTOM = {{CUSTOM}};
+let HOST_FS = {{HOST_FS}}; // the app puts the player in full screen, with its panel
 let cur = null, token = 0, sent = false;
 let quals = [], switching = null; // the episode's resolutions; the quality being switched to
 let lastReport = 0;
@@ -576,6 +593,7 @@ const store = {
 const hasPrev = () => cur && cur.ep > 1;
 const hasNext = () => cur && (!cur.total || cur.ep < cur.total);
 let refreshNav = function () {
+  $('ftitle').textContent = cur ? (cur.title ? cur.title + '  ' : '') + '第 ' + cur.ep + ' 集' : '';
   $('prev').hidden = !hasPrev(); $('next').hidden = !hasNext(); $('endnext').hidden = !hasNext();
   if ('mediaSession' in navigator) {
     try {
@@ -765,16 +783,17 @@ function step(to) {
 }
 
 // --- full screen: the whole page, not the <video> ---
-// WebKit's controls put the <video> alone in full screen, which leaves the
-// episode buttons behind, and a page cannot move that full screen to
-// itself: entering it took the click's user activation, which another
-// request needs. Double-click and F put the page in full screen instead,
-// which keeps the controls, the video's own, and the buttons over it; in
-// the controls' full screen, Shift+arrows and the media keys change
-// episodes.
-// With HOST_FS (Windows, Linux) the app fills the screen with the player
-// instead: there a page's full screen only fills its web view, which sits
-// small in the window, and WebView2 leaves growing it to the app.
+// With HOST_FS (always on Windows and Linux, on macOS by the experimental
+// setting) the app fills the screen with the player, so that it can open
+// the episode's panel beside it: elsewhere a page's full screen only fills
+// its web view, which sits small in the window. The episode's title then
+// shows at the top left with the controls, and opens the panel.
+// Otherwise (macOS) the page goes full screen in WKWebView's window of
+// its own. WebKit's controls put the <video> alone in full screen, which
+// leaves the episode buttons behind, and a page cannot move that full
+// screen to itself: entering it took the click's user activation, which
+// another request needs. Double-click and F put the page in full screen
+// instead, which keeps the controls and the buttons over it.
 const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
 const root = document.documentElement;
 function exitFS() {
@@ -793,6 +812,11 @@ function fsChanged() {
   else document.body.classList.toggle('full', !!fsEl());
   wake();
 }
+function setHostFS(on) {
+  HOST_FS = !!on;
+  document.body.classList.toggle('hostfs', HOST_FS);
+}
+setHostFS(HOST_FS);
 document.addEventListener('fullscreenchange', fsChanged);
 document.addEventListener('webkitfullscreenchange', fsChanged);
 
@@ -906,7 +930,14 @@ document.body.classList.toggle('nodm', !dm.on);
 $('dmb').onclick = dmToggle;
 
 window.smovie = { load, pause: () => { hold.paused = false; holdEnd(true); v.pause(); }, exitFullScreen: exitFS,
-  fullScreen: on => document.body.classList.toggle('full', !!on) };
+  fullScreen: on => document.body.classList.toggle('full', !!on),
+  panel: on => { document.body.classList.toggle('panel', !!on); wake(); }, hostFS: setHostFS };
+
+// The title opens the panel, and keeps the controls while the pointer is on it.
+$('ftitle').onclick = () => post('/fullscreen?to=panel');
+$('ftitle').addEventListener('mousedown', e => e.preventDefault());
+$('ftitle').addEventListener('mouseenter', () => { overBar = true; wake(); });
+$('ftitle').addEventListener('mouseleave', () => { overBar = false; wake(); });
 
 // --- playback ---
 onV('play', () => { show('ended', false); if (!advancing) wake(); });

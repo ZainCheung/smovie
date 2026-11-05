@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/egoist/mygo/ui"
 )
@@ -19,6 +20,14 @@ func (a *app) settingsPage(c *ui.Context) {
 				ui.Switch(c.Key("hold-lock"), &a.holdLock).Label("长按锁定倍速")
 			})
 		})
+
+		if runtime.GOOS == "darwin" {
+			section(c, "实验性功能", func() {
+				settingRow(c, "全屏剧集面板", panelFullDetail, func() {
+					ui.Switch(c.Key("panel-full"), &a.panelFull).Label("全屏剧集面板")
+				})
+			})
+		}
 
 		section(c, "存储", func() {
 			settingRow(c, "视频缓存上限", "超出后自动清理最久未看的剧集，正在播放的不受影响", func() {
@@ -60,6 +69,8 @@ func (a *app) settingsPage(c *ui.Context) {
 		})
 	})
 }
+
+const panelFullDetail = "全屏时左上角显示剧集标题，点击后在右侧打开选集与系列剧面板。开启后由应用窗口进入全屏，而非网页播放器自身的全屏"
 
 func (a *app) usageText(n int64) string {
 	if a.usage.measuring {

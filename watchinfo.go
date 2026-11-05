@@ -28,32 +28,14 @@ func (a *app) currentVID() string {
 // watchHeader is the episode's title, and below it the series, as video
 // sites show a channel, with its actions on the right.
 func (a *app) watchHeader(c *ui.Context, s hongguo.Series) {
-	title := s.Title
-	if a.current >= 0 {
-		title += fmt.Sprintf("  第 %d 集", a.current+1)
-	}
-	ui.Text(c, title).FontSize(20).FontWeight(700).LineHeight(1.3).MaxLines(2).Selectable()
+	ui.Text(c, a.episodeTitle(s)).FontSize(20).FontWeight(700).LineHeight(1.3).MaxLines(2).Selectable()
 	info := a.seriesInfo(s.ID).value
 	var ep *hongguo.EpisodeInfo
 	if vid := a.currentVID(); vid != "" {
 		ep = a.episodeInfo(s.ID, vid).value
 	}
 	ui.Row(c).Wrap().Justify(ui.SpaceBetween).AlignItems(ui.Center).GapX(16).GapY(10).Children(func() {
-		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-			avatar(c, a, s.Cover, s.Title, 40)
-			ui.Column(c).Gap(2).MaxWidth(280).Children(func() {
-				ui.Text(c, s.Title).FontSize(15).FontWeight(700).SingleLine()
-				var sub []string
-				if s.EpisodeLabel != "" {
-					sub = append(sub, s.EpisodeLabel)
-				}
-				if info != nil && info.Heat != "" {
-					sub = append(sub, info.Heat)
-				}
-				ui.Text(c, strings.Join(sub, " · ")).FontSize(12).TextColor(colorMuted).SingleLine()
-			})
-			a.listPill(c, s)
-		})
+		a.seriesLine(c, s, 280)
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Wrap().Children(func() {
 			if ep != nil && ep.Likes > 0 {
 				statPill(c, "likes", iconThumb, count(ep.Likes), "本集点赞")
@@ -72,6 +54,35 @@ func (a *app) watchHeader(c *ui.Context, s hongguo.Series) {
 				a.play(a.current + 1)
 			}
 		})
+	})
+}
+
+// episodeTitle is the series' title with the episode that plays.
+func (a *app) episodeTitle(s hongguo.Series) string {
+	if a.current < 0 {
+		return s.Title
+	}
+	return fmt.Sprintf("%s  第 %d 集", s.Title, a.current+1)
+}
+
+// seriesLine is the series as video sites show a channel: its picture,
+// its title over its episodes and heat, and the My List button.
+func (a *app) seriesLine(c *ui.Context, s hongguo.Series, maxW float32) {
+	info := a.seriesInfo(s.ID).value
+	ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+		avatar(c, a, s.Cover, s.Title, 40)
+		ui.Column(c).Gap(2).MaxWidth(maxW).Children(func() {
+			ui.Text(c, s.Title).FontSize(15).FontWeight(700).SingleLine()
+			var sub []string
+			if s.EpisodeLabel != "" {
+				sub = append(sub, s.EpisodeLabel)
+			}
+			if info != nil && info.Heat != "" {
+				sub = append(sub, info.Heat)
+			}
+			ui.Text(c, strings.Join(sub, " · ")).FontSize(12).TextColor(colorMuted).SingleLine()
+		})
+		a.listPill(c, s)
 	})
 }
 
@@ -222,8 +233,9 @@ func (a *app) description(c *ui.Context, s hongguo.Series) {
 }
 
 // episodePanel lists the episodes, as video sites list a playlist beside
-// the video.
-func (a *app) episodePanel(c *ui.Context, s hongguo.Series, width float32) {
+// the video, in a grid of at most gridH that scrolls; 0 shows some six
+// rows.
+func (a *app) episodePanel(c *ui.Context, s hongguo.Series, width, gridH float32) {
 	ui.Column(c.Key("episodes")).Width(width).Radius(12).Clip().Border(1, rgba(255, 255, 255, 34)).Children(func() {
 		album, seasons := a.albumOf()
 		showSeasons := a.panelSeasons && album != ""
@@ -309,9 +321,11 @@ func (a *app) episodePanel(c *ui.Context, s hongguo.Series, width float32) {
 			tw := (inner-gap*float32(cols-1))/float32(cols) - 0.01
 			lo, hi := a.epRange*epBlock, min((a.epRange+1)*epBlock, n)
 			rows := (hi - lo + cols - 1) / cols
-			gridH := float32(rows)*(tileH+gap) - gap
-			// Some six rows show; the rest scroll inside the panel.
-			ui.Scroll(c.Key(fmt.Sprint("ep-scroll", a.epRange))).Height(min(gridH, 6*(tileH+gap)-gap+tileH/2)).Children(func() {
+			if gridH <= 0 {
+				gridH = 6*(tileH+gap) - gap + tileH/2
+			}
+			// The rows that don't fit scroll inside the panel.
+			ui.Scroll(c.Key(fmt.Sprint("ep-scroll", a.epRange))).Height(min(float32(rows)*(tileH+gap)-gap, max(gridH, 2*tileH))).Children(func() {
 				ui.Row(c).Wrap().Gap(gap).Children(func() {
 					for i := lo; i < hi; i++ {
 						a.episodeTile(c, i, tw)

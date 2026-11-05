@@ -71,7 +71,7 @@ func (a *app) watchPage(c *ui.Context) {
 				Children(func() { a.playerOverlay(c) })
 			a.watchHeader(c, *s)
 			if !wide {
-				a.episodePanel(c, *s, mainW)
+				a.episodePanel(c, *s, mainW, 0)
 			}
 			a.description(c, *s)
 			a.comments(c, *s)
@@ -81,17 +81,26 @@ func (a *app) watchPage(c *ui.Context) {
 		})
 		if wide {
 			ui.Column(c).Width(sideWidth).Shrink(0).Gap(20).Children(func() {
-				a.episodePanel(c, *s, sideWidth)
+				a.episodePanel(c, *s, sideWidth, 0)
 				a.recommended(c, *s, sideWidth)
 			})
 		}
 	})
 }
 
-// fullPlayer is the player alone, filling the window in full screen.
-// Escape and F leave it, as the page's do once it has the keyboard.
+// fullPanelWidth is the panel beside the player in full screen, as
+// video sites open one from the title over their player.
+const fullPanelWidth = 448
+
+// fullPlayer is the player alone, filling the window in full screen, and
+// beside it, once its title over the player is clicked, a panel with the
+// episode, its series and the episodes to change to. Escape closes the
+// panel, then leaves; F leaves, as the page's keys do once it has the
+// keyboard.
 func (a *app) fullPlayer(c *ui.Context) {
-	if c.Shortcut(0, ui.KeyEscape) || c.Shortcut(0, ui.KeyF) {
+	if c.Shortcut(0, ui.KeyEscape) && a.fullPanel {
+		a.setFullPanel(false)
+	} else if c.Shortcut(0, ui.KeyEscape) || c.Shortcut(0, ui.KeyF) {
 		a.setPlayerFull(false)
 		return
 	}
@@ -101,7 +110,54 @@ func (a *app) fullPlayer(c *ui.Context) {
 			a.player.Focus()
 		}
 	}
-	ui.WebView(c, a.player).Fill().Background(rgba(0, 0, 0, 255))
+	_, h := c.Size()
+	ui.Row(c).Fill().Background(rgba(0, 0, 0, 255)).Children(func() {
+		ui.WebView(c, a.player).Grow(1).MinWidth(0).Height(h).Background(rgba(0, 0, 0, 255))
+		// The panel slides in from the right, pushing the picture to the
+		// middle of what is left; its content keeps its width meanwhile.
+		box := ui.Box(c.Key("full-panel")).Height(h).Shrink(0).Clip().Background(colorBG)
+		w := box.Animate("w", map[bool]float32{true: fullPanelWidth, false: 0}[a.fullPanel], 220*time.Millisecond)
+		box.Width(w)
+		if w < 1 {
+			return
+		}
+		box.Children(func() { a.fullPanelContent(c, h) })
+	})
+}
+
+// fullPanelContent is the episode's title and series, as on the watch
+// page, over the episodes and the series' seasons.
+func (a *app) fullPanelContent(c *ui.Context, h float32) {
+	s := a.series
+	if a.detail != nil {
+		s = &a.detail.Series
+	}
+	if s == nil {
+		return
+	}
+	const pad = 20
+	inner := float32(fullPanelWidth - 2*16 - 2*pad)
+	ui.Column(c).Absolute().Left(0).Top(0).Width(fullPanelWidth).Height(h).Padding(16).Children(func() {
+		ui.Column(c).Grow(1).MinHeight(0).Radius(16).Clip().Border(1, rgba(255, 255, 255, 34)).Background(rgba(255, 255, 255, 8)).Children(func() {
+			ui.Scroll(c.Key("full-panel-scroll")).Grow(1).MinHeight(0).Children(func() {
+				ui.Column(c).Padding(pad).Gap(16).Children(func() {
+					ui.Row(c).Gap(12).AlignItems(ui.Start).Children(func() {
+						ui.Text(c, a.episodeTitle(*s)).Grow(1).MinWidth(0).FontSize(22).FontWeight(700).LineHeight(1.3).MaxLines(3).Selectable()
+						x := ui.ButtonBase(c.Key("full-panel-close")).Size(36, 36).Shrink(0).Radius(18).Center().Label("关闭")
+						x.Background(rgba(255, 255, 255, 30*b2f(x.Hovered())))
+						x.Children(func() { ui.Icon(c, iconClose).Size(22, 22).TextColor(colorWhite) })
+						if x.Clicked() {
+							a.setFullPanel(false)
+						}
+					})
+					a.seriesLine(c, *s, inner-40-12-12-120)
+					// The grid takes the height the title, the series and the
+					// panel's head and ranges leave.
+					a.episodePanel(c, *s, inner, h-400)
+				})
+			})
+		})
+	})
 }
 
 func (a *app) episodeTile(c *ui.Context, i int, width float32) {

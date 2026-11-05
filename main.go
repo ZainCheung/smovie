@@ -110,10 +110,15 @@ type app struct {
 	board    string
 	descOpen bool
 
-	// The player fills the screen (hostFullScreen); the window was not in
-	// full screen before, so it leaves it after.
+	// The player fills the screen; the window was not in full screen
+	// before, so it leaves it after.
 	playerFull     bool
 	windowedBefore bool
+	// fullPanel shows the episode's panel beside the player in full screen.
+	fullPanel bool
+	// panelFull is the setting: on macOS, the app fills the screen with
+	// the player, as hostFullScreen says.
+	panelFull bool
 }
 
 func newApp() *app {
@@ -137,6 +142,7 @@ func newApp() *app {
 		epInfos:      map[string]*loaded[hongguo.EpisodeInfo]{},
 		autoNext:     st.AutoNext,
 		holdLock:     st.HoldLock,
+		panelFull:    st.PanelFullScreen,
 		saved:        st,
 		videoCache:   st.VideoCache,
 		quality:      st.Quality,
@@ -453,6 +459,9 @@ func (a *app) episode(index int, start float64) episodeInfo {
 // tellPlayer calls a function of the player page with a JSON argument.
 // A page still loading misses it, and reads the episode from /current.
 func (a *app) tellPlayer(fn string, arg any) {
+	if a.player == nil {
+		return // not made yet, or in tests
+	}
 	data, _ := json.Marshal(arg)
 	page := a.player.Page()
 	go func() { _, _ = page.Eval(fmt.Sprintf("window.smovie && %s(%s)", fn, data)) }()
@@ -516,27 +525,47 @@ func (a *app) forgetAll() {
 	saveHistory(nil)
 }
 
-// hostFullScreen is where the app, rather than the web view, puts the
-// player in full screen: WebView2 (Windows) and WebKitGTK only fill the
-// web view with a page's full screen, which stays at its size in the
-// window. WKWebView (macOS) shows it in a full screen window of its own.
-var hostFullScreen = runtime.GOOS != "darwin"
+// hostFullScreen is whether the app, rather than the web view, puts the
+// player in full screen, which leaves room for the episode's panel beside
+// it. WebView2 (Windows) and WebKitGTK only fill the web view with a
+// page's full screen, which stays at its size in the window, so there it
+// always does. WKWebView (macOS) shows a page's full screen in a window of
+// its own, which stays the way unless the experimental setting is on.
+func (a *app) hostFullScreen() bool { return runtime.GOOS != "darwin" || a.panelFull }
 
-// fullScreen is the player page's request: "on", "off" or "toggle".
+// fullScreen is the player page's request: "on", "off" or "toggle", or
+// "panel" to open or close the panel beside it. "off" closes the panel
+// first, as Escape does.
 func (a *app) fullScreen(to string) {
-	if !hostFullScreen {
-		return
-	}
 	a.win.Update(func() {
+		if !a.hostFullScreen() {
+			return
+		}
 		switch to {
 		case "on":
 			a.setPlayerFull(true)
 		case "off":
-			a.setPlayerFull(false)
+			if a.fullPanel {
+				a.setFullPanel(false)
+			} else {
+				a.setPlayerFull(false)
+			}
 		case "toggle":
 			a.setPlayerFull(!a.playerFull)
+		case "panel":
+			a.setFullPanel(!a.fullPanel)
 		}
 	})
+}
+
+// setFullPanel opens or closes the panel beside the player in full screen.
+func (a *app) setFullPanel(on bool) {
+	if on && !a.playerFull || on == a.fullPanel {
+		return
+	}
+	a.fullPanel = on
+	a.tellPlayer("smovie.panel", on)
+	a.win.Invalidate()
 }
 
 // setPlayerFull shows the player alone over the whole screen, or leaves
@@ -546,6 +575,7 @@ func (a *app) setPlayerFull(on bool) {
 		return
 	}
 	a.playerFull = on
+	a.setFullPanel(false)
 	a.tellPlayer("smovie.fullScreen", on)
 	if on {
 		a.windowedBefore = !a.win.IsFullScreen()
@@ -604,6 +634,7 @@ func main() {
 		log.Fatal(err)
 	}
 	a.server = srv
+	srv.hostFS.Store(a.hostFullScreen())
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:           "红果短剧",
