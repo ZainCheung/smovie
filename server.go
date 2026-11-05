@@ -139,8 +139,7 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 		}
 		_, _ = strings.NewReplacer("{{MUTED}}", muted,
 			"{{HOST_FS}}", strconv.FormatBool(hostFullScreen),
-			"{{CUSTOM}}", strconv.FormatBool(customControls()),
-			"{{LAYOUT}}", controlsLayout()).WriteString(w, playerHTML)
+			"{{CUSTOM}}", strconv.FormatBool(customControls())).WriteString(w, playerHTML)
 	})
 	mux.HandleFunc("GET /media/{file}", s.media)
 	mux.HandleFunc("GET /current", func(w http.ResponseWriter, r *http.Request) {
@@ -249,17 +248,6 @@ func startMediaServer(lib *library, events playerEvents) (*mediaServer, error) {
 // does everywhere; SMOVIE_NATIVE_CONTROLS=1 shows WebKit's on macOS.
 func customControls() bool {
 	return runtime.GOOS != "darwin" || os.Getenv("SMOVIE_NATIVE_CONTROLS") == ""
-}
-
-// controlsLayout is how the controls are laid out: on macOS as video sites
-// have them, the progress bar along the top and below it play, volume and
-// time at the left, quality, speed and full screen at the right ("yt");
-// elsewhere in one row with the episode buttons ("").
-func controlsLayout() string {
-	if runtime.GOOS == "darwin" {
-		return "yt"
-	}
-	return ""
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -406,9 +394,10 @@ func parseRange(v string, total int64) (start, end int64, ok bool) {
 	return start, end, true
 }
 
-// playerHTML plays episodes with controls of its own, of frosted glass:
-// on macOS laid out as video sites have them, elsewhere in one row with
-// the episode buttons. Previous and next also answer the media keys
+// playerHTML plays episodes with controls of its own, of frosted glass,
+// laid out as video sites have them: the progress bar along the top, and
+// below it play, volume and time at the left; danmaku, quality, speed and
+// full screen at the right. Previous and next answer the media keys
 // through Media Session; and full screen, which for a <video> would leave
 // the controls behind, is the page's.
 const playerHTML = `<!doctype html>
@@ -466,19 +455,19 @@ body.nodm #dm{display:none}
 #toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);padding:8px 16px;border-radius:10px;background:rgba(0,0,0,.75);
   font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
-/* --- the custom controls (CUSTOM), in the manner of macOS's --- */
+/* --- the custom controls (CUSTOM) --- */
 #bar{display:none}
 body.custom #bar{display:grid}
 body.custom .side{display:none}
 body.custom:not(.active){cursor:none}
-#bar{position:fixed;left:14px;right:14px;bottom:12px;grid-template-columns:auto 1fr auto;grid-template-areas:"l s r";
-  align-items:center;column-gap:10px;padding:6px 10px;border-radius:24px;background:rgba(36,36,38,.62);
+#bar{position:fixed;left:12px;right:12px;bottom:12px;grid-template-columns:1fr auto;grid-template-areas:"s s" "l r";
+  align-items:center;column-gap:8px;padding:4px 8px 6px;border-radius:20px;background:rgba(36,36,38,.62);
   -webkit-backdrop-filter:blur(24px) saturate(1.8);backdrop-filter:blur(24px) saturate(1.8);
   box-shadow:0 8px 30px rgba(0,0,0,.35),inset 0 0 0 .5px rgba(255,255,255,.12);
   opacity:0;transition:opacity .25s;pointer-events:none}
 body.active #bar{opacity:1;pointer-events:auto}
-.grp{display:flex;align-items:center;gap:2px}
-#bl{grid-area:l} #br{grid-area:r} #seek{grid-area:s;display:flex;align-items:center;gap:12px;min-width:0}
+.grp{display:flex;align-items:center;gap:4px}
+#bl{grid-area:l} #br{grid-area:r} #seek{grid-area:s;display:flex;align-items:center;min-width:0;padding:0 8px}
 .cb{position:relative;width:36px;height:36px;border-radius:18px;background:none;display:flex;align-items:center;justify-content:center;
   color:rgba(255,255,255,.92);transition:background .15s,transform .1s;flex:none}
 .cb:hover{background:rgba(255,255,255,.14);color:#fff}
@@ -487,13 +476,13 @@ body.active #bar{opacity:1;pointer-events:auto}
 .cb svg{width:22px;height:22px}
 svg{display:block}
 .cb.big svg{width:26px;height:26px}
-.cb .n{position:absolute;font-size:8.5px;font-weight:700;top:50%;left:50%;transform:translate(-50%,-38%)}
-.time{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.92);flex:none}
-.track{position:relative;flex:1;min-width:40px;height:22px;cursor:pointer;touch-action:none}
+.time{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;color:rgba(255,255,255,.92);flex:none;margin-left:6px}
+.track{position:relative;flex:1;min-width:40px;height:18px;cursor:pointer;touch-action:none}
 .track .rail,.track .buf,.track .fill{position:absolute;left:0;top:50%;height:6px;margin-top:-3px;border-radius:3px}
 .track .rail{right:0;background:rgba(255,255,255,.22)}
 .track .buf{background:rgba(255,255,255,.3);width:0}
 .track .fill{background:#fff;width:0}
+#prog .fill,#prog .knob{background:#ff0033}
 .track .knob{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;background:#fff;
   box-shadow:0 1px 4px rgba(0,0,0,.4);transition:transform .12s;left:0}
 .track:hover .knob,.track.drag .knob{transform:scale(1.15)}
@@ -506,6 +495,8 @@ svg{display:block}
 #vol:hover .track,#vol .track.drag{width:72px;margin:0 8px 0 2px;overflow:visible}
 #vol .knob{width:12px;height:12px;margin:-6px 0 0 -6px}
 #spd{width:auto;min-width:44px;padding:0 8px;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+#q{width:auto;min-width:44px;padding:0 10px;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+#q sup{font-size:9px;font-weight:800;margin-left:1px;color:#ff5a62;vertical-align:5px}
 .menu{position:absolute;bottom:46px;right:0;display:none;flex-direction:column;padding:6px;border-radius:14px;min-width:112px;
   background:rgba(36,36,38,.86);-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);
   box-shadow:0 10px 30px rgba(0,0,0,.45),inset 0 0 0 .5px rgba(255,255,255,.12)}
@@ -513,35 +504,14 @@ svg{display:block}
 .menu button{background:none;text-align:left;padding:7px 12px 7px 28px;border-radius:8px;font-size:13px;font-weight:600;position:relative}
 .menu button:hover{background:rgba(255,255,255,.14)}
 .menu button.on::before{content:"";position:absolute;left:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#e50914}
+.menu button,.menu .hint{white-space:nowrap}
+.menu .lab{display:flex;align-items:center;gap:6px}
+.menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rgba(255,255,255,.5)}
 .wrap{position:relative}
 .fs-exit,body.full .fs-enter{display:none} body.full .fs-exit{display:block}
 .pl-pause,body.playing .pl-play{display:none} body.playing .pl-pause{display:block}
 .vo-off,body.muted .vo-on{display:none} body.muted .vo-off{display:block}
-/* A narrow player, as a portrait episode's: the progress bar takes a row of its own. */
-@media (max-width:600px){
-  #bar{grid-template-columns:1fr auto;grid-template-areas:"s s" "l r";row-gap:2px;padding:8px 8px 4px;border-radius:18px;left:8px;right:8px;bottom:8px}
-  #seek{padding:0 6px}
-  .opt{display:none}
-}
-@media (max-width:380px){ #pip{display:none} }
-/* --- macOS (yt): as video sites have them, the progress bar along the top of
-   the glass, and below it play, volume and time at the left; quality, speed
-   and full screen at the right. --- */
-#qwrap{display:none}
-body.yt #qwrap{display:block}
-body.yt #bar{grid-template-columns:1fr auto;grid-template-areas:"s s" "l r";row-gap:0;column-gap:8px;
-  left:12px;right:12px;bottom:12px;padding:4px 8px 6px;border-radius:20px}
-body.yt #seek{padding:0 8px}
-body.yt .track{height:18px}
-body.yt #prog .fill,body.yt #prog .knob{background:#ff0033}
-body.yt #bl,body.yt #br{gap:4px}
-body.yt .ytime{margin-left:6px;flex:none}
-body.yt .txt{width:auto;min-width:44px;padding:0 10px;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
-body.yt .txt sup{font-size:9px;font-weight:800;margin-left:1px;color:#ff5a62;vertical-align:5px}
-body.yt .menu button,body.yt .menu .hint{white-space:nowrap}
-body.yt .menu .lab{display:flex;align-items:center;gap:6px}
-body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rgba(255,255,255,.5)}
-@media (max-width:420px){ body.yt .ytime{display:none} }
+@media (max-width:420px){ .time{display:none} }
 </style></head>
 <body>
 <video id="v" controls playsinline preload="auto"></video>
@@ -563,22 +533,16 @@ body.yt .menu .hint{padding:4px 12px 6px;font-size:11px;font-weight:600;color:rg
 <div id="toast"></div>
 <div id="bar">
   <div class="grp" id="bl">
-    <button class="cb" id="cprev" title="上一集 (Shift+←)"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM19 5.5v13a1 1 0 0 1-1.5.86l-9.2-6.5a1 1 0 0 1 0-1.72l9.2-6.5A1 1 0 0 1 19 5.5z"/></svg></button>
-    <button class="cb opt" id="back" title="快退 10 秒 (←)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 3v5h5"/></svg><span class="n">10</span></button>
     <button class="cb big" id="play" title="播放/暂停 (空格)"><svg viewBox="0 0 24 24" fill="currentColor" class="pl-play"><path d="M7 4.8v14.4a1 1 0 0 0 1.5.86l12-7.2a1 1 0 0 0 0-1.72l-12-7.2A1 1 0 0 0 7 4.8z"/></svg><svg viewBox="0 0 24 24" fill="currentColor" class="pl-pause"><rect x="6" y="4.5" width="4" height="15" rx="1.2"/><rect x="14" y="4.5" width="4" height="15" rx="1.2"/></svg></button>
-    <button class="cb opt" id="fwd" title="快进 10 秒 (→)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 3v5h-5"/></svg><span class="n">10</span></button>
-    <button class="cb" id="cnext" title="下一集 (Shift+→)"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM5 5.5v13a1 1 0 0 0 1.5.86l9.2-6.5a1 1 0 0 0 0-1.72l-9.2-6.5A1 1 0 0 0 5 5.5z"/></svg></button>
-  </div>
-  <div id="seek"><span class="time" id="tcur">00:00</span>
-    <div class="track" id="prog"><div class="rail"></div><div class="buf"></div><div class="fill"></div><div class="knob"></div><div class="tip"></div></div>
-    <span class="time" id="tdur">00:00</span></div>
-  <div class="grp" id="br">
     <div id="vol"><button class="cb" id="mute" title="静音 (M)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-on"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="vo-off"><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor"/><path d="m16 9 6 6M22 9l-6 6"/></svg></button>
       <div class="track" id="volbar"><div class="rail"></div><div class="fill"></div><div class="knob"></div></div></div>
+    <span class="time"><span id="tcur">0:00</span> / <span id="tdur">0:00</span></span>
+  </div>
+  <div id="seek"><div class="track" id="prog"><div class="rail"></div><div class="buf"></div><div class="fill"></div><div class="knob"></div><div class="tip"></div></div></div>
+  <div class="grp" id="br">
     <button class="cb" id="dmb" title="弹幕 (D)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="dm-on"><rect x="2.5" y="4.5" width="19" height="15" rx="3"/><path d="M6.5 9.5h6M9 13.5h8.5M6.5 13.5h.01M15.5 9.5h2"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="dm-off"><rect x="2.5" y="4.5" width="19" height="15" rx="3" opacity=".55"/><path d="M6.5 9.5h6M9 13.5h8.5" opacity=".55"/><path d="m4 3 16 18"/></svg></button>
-    <div class="wrap" id="qwrap"><button class="cb txt" id="q" title="清晰度">清晰度</button><div class="menu" id="qmenu"></div></div>
+    <div class="wrap"><button class="cb" id="q" title="清晰度">清晰度</button><div class="menu" id="qmenu"></div></div>
     <div class="wrap"><button class="cb" id="spd" title="倍速 ([ / ])">1x</button><div class="menu" id="spdmenu"></div></div>
-    <button class="cb opt" id="pip" title="画中画"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5.5" rx="1" fill="currentColor" stroke="none"/></svg></button>
     <button class="cb" id="fs" title="全屏 (F)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-enter"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fs-exit"><path d="M9 4v4a1 1 0 0 1-1 1H4M20 9h-4a1 1 0 0 1-1-1V4M15 20v-4a1 1 0 0 1 1-1h4M4 15h4a1 1 0 0 1 1 1v4"/></svg></button>
   </div>
 </div>
@@ -589,7 +553,7 @@ const $ = id => document.getElementById(id);
 // see takeSpare. onV listens to whichever plays.
 let v = $('v');
 const onV = (type, fn) => { for (const el of [$('v'), $('v2')]) el.addEventListener(type, e => { if (e.target === v) fn(e); }); };
-const MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}}, YT = CUSTOM && '{{LAYOUT}}' === 'yt';
+const MUTED = {{MUTED}}, HOST_FS = {{HOST_FS}}, CUSTOM = {{CUSTOM}};
 let cur = null, token = 0, sent = false;
 let quals = [], switching = null; // the episode's resolutions; the quality being switched to
 let lastReport = 0;
@@ -1179,7 +1143,7 @@ const pad2 = n => String(n).padStart(2, '0');
 function hms(s) {
   s = Math.max(0, Math.floor(s || 0));
   const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
-  return (h ? h + ':' + pad2(m) : YT ? m : pad2(m)) + ':' + pad2(s % 60);
+  return (h ? h + ':' + pad2(m) : m) + ':' + pad2(s % 60);
 }
 // slider makes el a horizontal slider: set(frac) as it is dragged or
 // clicked, done() once let go, tip(frac) the text over the pointer.
@@ -1231,15 +1195,8 @@ function setupControls() {
   bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
   bar.addEventListener('dblclick', e => e.stopPropagation());
   $('play').onclick = togglePlay;
-  $('back').onclick = () => seek(-10);
-  $('fwd').onclick = () => seek(10);
-  $('cprev').onclick = () => step('prev');
-  $('cnext').onclick = () => step('next');
   $('fs').onclick = toggleFS;
   $('mute').onclick = () => { if (v.muted || v.volume === 0) { v.muted = false; if (!v.volume) v.volume = 0.5; } else v.muted = true; };
-  if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
-    $('pip').onclick = () => (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(() => {});
-  } else $('pip').remove();
   const menu = $('spdmenu');
   for (const r of SPEEDS.slice().reverse()) {
     const b = document.createElement('button');
@@ -1248,7 +1205,10 @@ function setupControls() {
     menu.appendChild(b);
   }
   $('spd').onclick = e => { e.stopPropagation(); $('qmenu').classList.remove('open'); menu.classList.toggle('open'); paintSpeed(); };
-  if (YT) setupYT();
+  $('q').onclick = e => {
+    e.stopPropagation(); menu.classList.remove('open');
+    if ($('qmenu').classList.toggle('open')) openQMenu();
+  };
   document.addEventListener('pointerdown', e => {
     const w = e.target.closest('.wrap');
     for (const m of document.querySelectorAll('.menu.open')) if (!w || !w.contains(m)) m.classList.remove('open');
@@ -1262,14 +1222,14 @@ function setupControls() {
   ['timeupdate', 'durationchange', 'progress', 'seeked', 'emptied', 'loadedmetadata'].forEach(e => onV(e, paintTime));
   onV('volumechange', paintVolume);
   onV('ratechange', paintSpeed);
+  onV('loadedmetadata', paintQuality);
+  onV('emptied', paintQuality);
   const playing = () => document.body.classList.toggle('playing', !v.paused);
   onV('play', playing); onV('pause', playing);
-  const nav = refreshNav;
-  refreshNav = () => { nav(); if ($('cprev')) { $('cprev').disabled = !hasPrev(); $('cnext').disabled = !hasNext(); } };
-  paintTime(); paintVolume(); paintSpeed(); refreshNav();
+  paintTime(); paintVolume(); paintSpeed(); paintQuality();
 }
 
-// --- macOS: the controls as video sites lay them out ---
+// --- quality ---
 const qlabel = px => px + 'P';
 // playingPx is the resolution that plays, the shorter side, as the API
 // counts it.
@@ -1307,26 +1267,6 @@ async function openQMenu() {
     if (cur && cur.vid === vid && Array.isArray(q)) { quals = q; if ($('qmenu').classList.contains('open')) paintQMenu(); }
   } catch (_) {}
 }
-function setupYT() {
-  document.body.classList.add('yt');
-  // Left: play, volume, time; the progress bar alone above; right: quality,
-  // speed, full screen. Episodes change from the list, Shift+arrows and
-  // the media keys.
-  const bl = $('bl'), br = $('br');
-  for (const id of ['cprev', 'cnext', 'back', 'fwd', 'pip']) { const el = $(id); if (el) el.remove(); }
-  const time = document.createElement('span'); time.className = 'time ytime';
-  time.append($('tcur'), ' / ', $('tdur'));
-  bl.append($('vol'), time);
-  br.append($('qwrap'), $('spd').parentElement, $('fs'));
-  $('q').onclick = e => {
-    e.stopPropagation(); $('spdmenu').classList.remove('open');
-    if ($('qmenu').classList.toggle('open')) openQMenu();
-  };
-  onV('loadedmetadata', paintQuality);
-  onV('emptied', paintQuality);
-  paintQuality();
-}
-
 v.volume = store.get('volume', 1); v.muted = MUTED || store.get('muted', false);
 if (CUSTOM) setupControls();
 refreshNav();
