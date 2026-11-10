@@ -64,9 +64,7 @@ func (a *app) settingsPage(c *ui.Context) {
 			})
 		})
 
-		section(c, "关于", func() {
-			settingRow(c, "红果短剧", "版本 0.1.0 · 内容来自红果短剧公开目录", func() {})
-		})
+		section(c, "关于", func() { a.aboutRows(c) })
 	})
 }
 

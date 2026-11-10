@@ -20,6 +20,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check the tag matches the version
         run: test "$GITHUB_REF_NAME" = "v$(jq -r .version package.json)"
+      # The update window shows this section, and the builds fail without it.
+      - name: Check the changelog has the version
+        run: grep -q "^## \[\?$(jq -r .version package.json)\b" CHANGELOG.md
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -87,8 +90,20 @@ jobs:
             --key "$RUNNER_TEMP/key.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
           rm "$RUNNER_TEMP/key.p8"
           echo "NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      # The key signs the updates that installed apps download (updates in
+      # mygo.config.ts): the archives, the deltas from the versions before,
+      # and the manifests that name them. Without it the build makes none.
       - name: Build
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         run: bun run build -- -platform "${{ matrix.platform }}"
+      - name: Check the build made its updates
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          for target in $(echo "${{ matrix.platform }}" | tr ',/' ' -'); do
+            test -s "build/$target/update-$target.json" || { echo "no update manifest for $target"; exit 1; }
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: smovie-${{ matrix.name }}
@@ -98,6 +113,8 @@ jobs:
             build/*/*-setup-*.exe
             build/*/*.deb
             build/*/*.tar.gz
+            build/*/*.delta
+            build/*/update-*.json
       - name: Upload to the release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -106,7 +123,9 @@ jobs:
         run: |
           shopt -s nullglob
           gh release upload "$GITHUB_REF_NAME" --clobber \
-            build/*/*.dmg build/*/*-setup-*.exe build/*/*.deb build/*/*.tar.gz
+            build/*/*.dmg build/*/*-setup-*.exe build/*/*.deb build/*/*.tar.gz build/*/*.delta
+          # The manifests last: apps read them from the latest release.
+          gh release upload "$GITHUB_REF_NAME" --clobber build/*/update-*.json
 
   publish:
     needs: build

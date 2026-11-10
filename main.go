@@ -119,6 +119,13 @@ type app struct {
 	// panelFull is the setting: on macOS, the app fills the screen with
 	// the player, as hostFullScreen says.
 	panelFull bool
+
+	// updates is whether the updater runs, which it does not in tests;
+	// autoUpdate whether it checks in the background, and newVersion the
+	// newer version its last check found.
+	updates    bool
+	autoUpdate bool
+	newVersion string
 }
 
 func newApp() *app {
@@ -635,6 +642,7 @@ func main() {
 	}
 	a.server = srv
 	srv.hostFS.Store(a.hostFullScreen())
+	a.useUpdates()
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:           "红果短剧",
@@ -666,6 +674,7 @@ func main() {
 		for _, cat := range hongguo.Categories {
 			a.ensureFeed(cat.Slug)
 		}
+		a.watchUpdates()
 		if onReady != nil {
 			onReady(a)
 		}

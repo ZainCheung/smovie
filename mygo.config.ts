@@ -12,6 +12,14 @@ export default defineConfig({
   // Windows .ico (16–256 px) and Linux icons are rendered from this 1024 px
   // PNG. It lives outside resources/, which ships inside the app as is.
   icon: "icon/icon.png",
+  // The app updates itself from the releases on GitHub (updates.go), which
+  // CI signs with MYGO_UPDATER_PRIVATE_KEY, the secret key of this one. On
+  // a Mac the key is in ~/Library/Application Support/mygo/update-keys;
+  // without it a build makes no update, and cannot update itself.
+  updates: {
+    publicKey: "LucWK1ts68/tzDWKR5VcuRyQsAlg9kwPEZnnPT5q9EU=",
+    github: "ZainCheung/smovie",
+  },
   // macOS: the Icon Composer document (open it in Icon Composer to edit),
   // compiled with Xcode 26+; without it the build falls back to icon.png.
   macos: {
