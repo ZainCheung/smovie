@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode"
 )
 
@@ -21,7 +20,7 @@ type Season struct {
 	Heat  string // "9667万热度"
 }
 
-const detailAPI = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_detail/preload/v1"
+const detailAPI = appAPIBase + "/novel/player/multi_video_detail/preload/v1"
 
 // seasonOf asks the app's series detail which collection a series is a
 // season of, and which season.
@@ -31,15 +30,7 @@ func seasonOf(ctx context.Context, seriesID string) (albumID string, s Season, e
 			"need_mp4_align": false, "screen_width_px": "900", "source": 7, "use_os_player": false, "use_server_dns": false},
 		"dr_scene": "preload", "series_id": seriesID,
 	})
-	dev, err := getDevice(ctx, false)
-	if err != nil {
-		return "", s, err
-	}
-	req, err := signedRequest(ctx, detailAPI, payload, dev, time.Now())
-	if err != nil {
-		return "", s, err
-	}
-	body, err := doJSON(req)
+	body, err := signedJSON(ctx, detailAPI, payload)
 	if err != nil {
 		return "", s, err
 	}

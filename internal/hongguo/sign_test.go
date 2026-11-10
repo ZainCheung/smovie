@@ -6,12 +6,14 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,20 +38,26 @@ func TestSigningReferenceVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var vectors []struct {
-		TS                                       uint32
-		Query, Body, Gorgon, Helios, F13, Medusa string
+		TS                                          uint32
+		Query, Gorgon, Helios, F13, Medusa, Version string
+		Body                                        *string
 	}
 	if err := json.Unmarshal(b, &vectors); err != nil {
 		t.Fatal(err)
 	}
 	for i, v := range vectors {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			bh := md5.Sum([]byte(v.Body))
+			var body []byte
+			var bh [16]byte
+			if v.Body != nil {
+				body = []byte(*v.Body)
+				bh = md5.Sum(body)
+			}
 			qh := sm3([]byte(v.Query))
 			if branch := signingBranch(qh, bh[:], v.TS); branch != 0 {
 				t.Fatalf("fixture uses branch %d", branch)
 			}
-			if got := xGorgon(v.Query, []byte(v.Body), v.TS, 0x1234); got != v.Gorgon {
+			if got := xGorgon(v.Query, body, v.TS, 0x1234); got != v.Gorgon {
 				t.Errorf("Gorgon = %s, want %s", got, v.Gorgon)
 			}
 			if got := helios(v.TS, 0x87654321); got != v.Helios {
@@ -61,7 +69,11 @@ func TestSigningReferenceVectors(t *testing.T) {
 			step := 0
 			randoms := []uint32{0x12345678, 0x9abcdef0, 0x10203040, 0x55667788, 0xabcdef01}
 			next := func() uint32 { v := randoms[step%len(randoms)]; step++; return v }
-			got := buildMedusa(v.Query, []byte(v.Body), v.TS, &device{DeviceID: "1234567890123456789"}, "fixed-signing-process-nonce", 1793606400123, next)
+			version := v.Version
+			if version == "" {
+				version = "7.1.3.32"
+			}
+			got := buildMedusa(v.Query, body, v.TS, &device{DeviceID: "1234567890123456789"}, "fixed-signing-process-nonce", 1793606400123, next, version)
 			if got != v.Medusa {
 				t.Errorf("Medusa differs from upstream reference:\n got %s\nwant %s", got, v.Medusa)
 			}
@@ -76,9 +88,8 @@ func (f signingTransport) RoundTrip(r *http.Request) (*http.Response, error) { r
 // Exercise the real resolver, including empty-response device renewal. A signer
 // that exists but is omitted from either request must fail this regression test.
 func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
-	oldClient, oldDev, oldRetry := httpClient, cachedDev, deviceRetry
-	t.Cleanup(func() { httpClient, cachedDev, deviceRetry = oldClient, oldDev, oldRetry })
-	cachedDev = &device{DeviceID: "1234567890123456789", IID: "2345678901234567890", CDID: "original-device"}
+	oldClient, oldRetry := httpClient, deviceRetry
+	t.Cleanup(func() { httpClient, deviceRetry = oldClient, oldRetry })
 	deviceRetry = time.Time{}
 	playCalls, registerCalls := 0, 0
 	var payloads [][]byte
@@ -88,7 +99,13 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 		}
 		if req.URL.Path == "/service/2/device_register/" {
 			registerCalls++
+			if registerCalls <= 2 {
+				return respond(`{"device_id_str":"1234567890123456789","install_id_str":"2345678901234567890"}`)
+			}
 			return respond(`{"device_id_str":"3456789012345678901","install_id_str":"4567890123456789012"}`)
+		}
+		if req.URL.Path == "/reading/bookapi/video_tab/multi_video_model/v1/" {
+			return respond(`{"code":100103}`)
 		}
 		if req.URL.Path != "/novel/player/multi_video_model/v1/" {
 			t.Fatalf("unexpected endpoint %s", req.URL.Path)
@@ -131,6 +148,13 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 		if q.Get("device_id") != wantID {
 			t.Errorf("request %d used wrong device", playCalls)
 		}
+		wantHost := "api5-normal-sinfonlineb.fqnovel.com"
+		if playCalls == 2 {
+			wantHost = "api5-normal-hl.fqnovel.com"
+		}
+		if req.URL.Hostname() != wantHost {
+			t.Errorf("request %d host=%s, want %s", playCalls, req.URL.Hostname(), wantHost)
+		}
 		if playCalls == 1 {
 			return respond("")
 		}
@@ -140,7 +164,7 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if playCalls != 2 || registerCalls != 1 {
+	if playCalls != 2 || registerCalls != 3 {
 		t.Fatalf("play=%d register=%d", playCalls, registerCalls)
 	}
 	if !bytes.Equal(payloads[0], payloads[1]) {
@@ -154,10 +178,12 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 // ResolvePlay plays the highest resolution up to the one asked for, the
 // lowest when all are higher, and tells them all.
 func TestResolvePlayQuality(t *testing.T) {
-	oldClient, oldDev := httpClient, cachedDev
-	t.Cleanup(func() { httpClient, cachedDev = oldClient, oldDev })
-	cachedDev = &device{DeviceID: "1234567890123456789", IID: "2345678901234567890", CDID: "original-device"}
+	oldClient := httpClient
+	t.Cleanup(func() { httpClient = oldClient })
 	httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/service/2/device_register/" {
+			return jsonResponse(`{"device_id_str":"1234567890123456789","install_id_str":"2345678901234567890"}`), nil
+		}
 		row := func(px, w, h int) string {
 			return `{"main_url":"https://example.fqnovelvod.com/` + strconv.Itoa(px) + `.mp4","codec_type":"h264","width":` + strconv.Itoa(w) + `,"height":` + strconv.Itoa(h) + `}`
 		}
@@ -178,5 +204,239 @@ func TestResolvePlayQuality(t *testing.T) {
 		if fmt.Sprint(info.Qualities) != "[1080 720 540]" {
 			t.Errorf("qualities %v", info.Qualities)
 		}
+	}
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+}
+
+// The legacy endpoint can stay empty while video_tab returns a complete model.
+// A resolver must use the new path first and keep the exact requested episode.
+func TestResolvePlayVideoTab(t *testing.T) {
+	oldClient, oldRetry := httpClient, deviceRetry
+	t.Cleanup(func() { httpClient, deviceRetry = oldClient, oldRetry })
+	model := `{"video_list":[{"main_url":"https://example.fqnovelvod.com/video.mp4","codec_type":"bytevc1","width":1080,"height":1920}]}`
+	encodedModel, _ := json.Marshal(model)
+	for _, c := range []struct {
+		name, body string
+		fallback   bool
+	}{
+		{"object", `{"code":0,"data":{"video_model_data":{"123":{"video_model":` + model + `}}}}`, false},
+		{"string", `{"code":0,"data":{"video_model_data":{"123":{"video_model":` + string(encodedModel) + `}}}}`, false},
+		{"empty", ``, true},
+		{"business error", `{"code":100103}`, true},
+		{"invalid JSON", `invalid`, true},
+		{"other episode", `{"code":0,"data":{"video_model_data":{"456":{"video_model":` + model + `}}}}`, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			deviceRetry = time.Time{}
+			registers, gets, posts := 0, 0, 0
+			httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/service/2/device_register/":
+					registers++
+					res := jsonResponse(`{"device_id_str":"1234567890123456789","install_id_str":"2345678901234567890"}`)
+					res.Header.Add("Set-Cookie", "ttreq=anonymous-token; Path=/; HttpOnly")
+					res.Header.Add("Set-Cookie", "store-region=cn; Path=/")
+					res.Header.Add("Set-Cookie", "sessionid=unrelated-token; Path=/")
+					return res, nil
+				case "/reading/bookapi/video_tab/multi_video_model/v1/":
+					gets++
+					if req.Method != http.MethodGet || req.ContentLength != 0 {
+						t.Errorf("video_tab request method=%s length=%d", req.Method, req.ContentLength)
+					}
+					q := req.URL.Query()
+					for k, want := range map[string]string{
+						"video_id": "123", "video_id_type": "0", "device_level": "1",
+						"need_all_video_definition": "1", "need_mp4_align": "0", "use_os_player": "0",
+						"video_platform": "1024", "source": "0", "from_video_id": "",
+						"version_code": "73932", "version_name": "7.3.9.32",
+					} {
+						if !q.Has(k) || q.Get(k) != want {
+							t.Errorf("%s=%q, want %q", k, q.Get(k), want)
+						}
+					}
+					ts, _ := strconv.ParseUint(req.Header.Get("x-khronos"), 10, 32)
+					if signingBranch(sm3([]byte(req.URL.RawQuery)), make([]byte, 16), uint32(ts)) != 0 {
+						t.Error("GET body hash must be zero bytes")
+					}
+					if req.Header.Get("x-medusa") == "" || req.Header.Get("x-gorgon") == "" {
+						t.Error("GET is unsigned")
+					}
+					if req.Header.Get("x-ss-stub") != "" {
+						t.Error("GET carries a POST body digest")
+					}
+					if !strings.Contains(req.Header.Get("Cookie"), "ttreq=anonymous-token") || strings.Contains(req.Header.Get("Cookie"), "sessionid") {
+						t.Error("request did not keep only anonymous registration cookies")
+					}
+					return jsonResponse(c.body), nil
+				case "/novel/player/multi_video_model/v1/":
+					posts++
+					if !c.fallback {
+						t.Error("successful GET was followed by a legacy POST")
+					}
+					return jsonResponse(`{"code":0,"data":{"123":{"video_model":` + model + `}}}`), nil
+				default:
+					t.Fatalf("unexpected endpoint %s", req.URL.Path)
+					return nil, nil
+				}
+			})}
+			info, err := ResolvePlay(context.Background(), "123", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.VID != "123" || info.Codec != "hevc" || info.Quality != "1080P" {
+				t.Fatalf("unexpected source %+v", info)
+			}
+			wantPosts := 0
+			if c.fallback {
+				wantPosts = 1
+			}
+			if gets != 1 || posts != wantPosts || registers != 1+wantPosts {
+				t.Fatalf("gets=%d posts=%d registers=%d", gets, posts, registers)
+			}
+		})
+	}
+}
+
+// A successful device may become single-use. Neither the next episode nor a
+// concurrent season lookup should first spend a request on that identity.
+func TestSignedJSONFreshDevices(t *testing.T) {
+	oldClient, oldRetry := httpClient, deviceRetry
+	t.Cleanup(func() { httpClient, deviceRetry = oldClient, oldRetry })
+	for _, concurrent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("concurrent=%t", concurrent), func(t *testing.T) {
+			deviceRetry = time.Time{}
+			var mu sync.Mutex
+			registers, calls := 0, 0
+			seen := map[string]bool{}
+			httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if req.URL.Path == "/service/2/device_register/" {
+					registers++
+					return jsonResponse(fmt.Sprintf(`{"device_id_str":"34567890123456789%02d","install_id_str":"4567890123456789012"}`, registers)), nil
+				}
+				calls++
+				id := req.URL.Query().Get("device_id")
+				if seen[id] {
+					t.Errorf("identity %s reused for %s", id, req.URL.Path)
+					return jsonResponse(""), nil
+				}
+				seen[id] = true
+				return jsonResponse(`{"ok":true}`), nil
+			})}
+			var wg sync.WaitGroup
+			for _, api := range []string{videoAPI, videoAPI, detailAPI, videoAPI} {
+				call := func() {
+					defer wg.Done()
+					if _, err := signedJSON(context.Background(), api, []byte(`{}`)); err != nil {
+						t.Error(err)
+					}
+				}
+				wg.Add(1)
+				if concurrent {
+					go call()
+				} else {
+					call()
+				}
+			}
+			wg.Wait()
+			if calls != 4 || registers != 4 || len(seen) != 4 {
+				t.Fatalf("calls=%d registers=%d devices=%d, want 4 each", calls, registers, len(seen))
+			}
+		})
+	}
+}
+
+func TestSignedJSONRetryBoundaries(t *testing.T) {
+	oldClient, oldRetry := httpClient, deviceRetry
+	t.Cleanup(func() { httpClient, deviceRetry = oldClient, oldRetry })
+	for _, c := range []struct {
+		name         string
+		status       int
+		body         string
+		transportErr error
+		cancel       bool
+		wantCalls    int
+		wantErr      error
+	}{
+		{name: "empty", status: 200, wantCalls: 2, wantErr: errEmpty},
+		{name: "cancel during retry", status: 200, cancel: true, wantCalls: 1, wantErr: context.Canceled},
+		{name: "rate limited", status: 429, wantCalls: 1},
+		{name: "server error", status: 503, wantCalls: 1},
+		{name: "business response", status: 200, body: `{"code":1001}`, wantCalls: 1},
+		{name: "network error", transportErr: io.ErrUnexpectedEOF, wantCalls: 1, wantErr: io.ErrUnexpectedEOF},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			deviceRetry = time.Time{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			registers, calls := 0, 0
+			httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/service/2/device_register/" {
+					registers++
+					return jsonResponse(fmt.Sprintf(`{"device_id_str":"34567890123456789%02d","install_id_str":"4567890123456789012"}`, registers)), nil
+				}
+				calls++
+				if c.cancel {
+					cancel()
+				}
+				if c.transportErr != nil {
+					return nil, c.transportErr
+				}
+				res := jsonResponse(c.body)
+				res.StatusCode = c.status
+				return res, nil
+			})}
+			_, err := signedJSON(ctx, videoAPI, []byte(`{}`))
+			if c.wantErr != nil && !errors.Is(err, c.wantErr) {
+				t.Errorf("error=%v, want %v", err, c.wantErr)
+			}
+			if c.status >= 400 && err == nil {
+				t.Error("HTTP error was ignored")
+			}
+			if c.body != "" && err != nil {
+				t.Error(err)
+			}
+			if calls != c.wantCalls || registers != c.wantCalls {
+				t.Fatalf("calls=%d registers=%d, want %d each", calls, registers, c.wantCalls)
+			}
+		})
+	}
+}
+
+func TestSignedJSONRegistrationFailure(t *testing.T) {
+	oldClient, oldRetry := httpClient, deviceRetry
+	t.Cleanup(func() { httpClient, deviceRetry = oldClient, oldRetry })
+	deviceRetry = time.Time{}
+	calls := 0
+	httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Path != "/service/2/device_register/" {
+			t.Errorf("model request after failed registration")
+		}
+		res := jsonResponse("")
+		res.StatusCode = http.StatusTooManyRequests
+		return res, nil
+	})}
+	for i := 0; i < 2; i++ {
+		if _, err := signedJSON(context.Background(), videoAPI, []byte(`{}`)); err == nil {
+			t.Fatal("expected registration failure")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("registration calls=%d, want 1 during cooldown", calls)
+	}
+
+	deviceRetry = time.Time{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := signedJSON(ctx, videoAPI, nil); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if calls != 1 || !deviceRetry.IsZero() {
+		t.Fatal("cancelled caller sent a request or imposed a cooldown")
 	}
 }

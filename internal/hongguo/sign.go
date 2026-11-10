@@ -43,14 +43,14 @@ func be32(v uint32) []byte        { return binary.BigEndian.AppendUint32(nil, v)
 func unhex(s string) []byte       { b, _ := hex.DecodeString(s); return b }
 func join(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
-// The signed bytes must be exactly the bytes sent in the URL and POST body.
-// Search ticket values until Medusa uses the supported branch, as upstream does.
-func playbackRequest(ctx context.Context, payload []byte, dev *device, now time.Time) (*http.Request, error) {
-	return signedRequest(ctx, videoAPI, payload, dev, now)
-}
-
 // signedRequest is a POST of payload to an app API, signed as playback's.
 func signedRequest(ctx context.Context, api string, payload []byte, dev *device, now time.Time) (*http.Request, error) {
+	return signedAPIRequest(ctx, http.MethodPost, api, nil, payload, dev, now)
+}
+
+// The signed bytes must be exactly the bytes sent in the URL and POST body.
+// Search ticket values until Medusa uses the supported branch, as upstream does.
+func signedAPIRequest(ctx context.Context, method, api string, params url.Values, payload []byte, dev *device, now time.Time) (*http.Request, error) {
 	q := url.Values{}
 	for k, v := range deviceQuery {
 		q.Set(k, v)
@@ -58,6 +58,9 @@ func signedRequest(ctx context.Context, api string, payload []byte, dev *device,
 	q.Set("device_id", dev.DeviceID)
 	q.Set("iid", dev.IID)
 	q.Set("cdid", dev.CDID)
+	for k, values := range params {
+		q[k] = append([]string(nil), values...)
+	}
 	ts := uint32(now.Unix())
 	q.Set("ts", strconv.FormatUint(uint64(ts), 10))
 	for n := 0; n < 128; n++ {
@@ -65,11 +68,11 @@ func signedRequest(ctx context.Context, api string, payload []byte, dev *device,
 		q.Set("_rticket", ticket)
 		query := strings.ReplaceAll(q.Encode(), "+", "%20")
 		queryHash := sm3([]byte(query))
-		bodyHash := md5.Sum(payload)
+		bodyHash := signingBodyHash(payload)
 		if signingBranch(queryHash, bodyHash[:], ts) != 0 {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, api+"?"+query, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, method, api+"?"+query, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
@@ -81,14 +84,32 @@ func signedRequest(ctx context.Context, api string, payload []byte, dev *device,
 			"x-ladon":  base64.StdEncoding.EncodeToString(be32(ts)),
 			"x-argus":  base64.StdEncoding.EncodeToString(le32(ts)),
 			"x-helios": helios(ts, random32()),
-			"x-medusa": buildMedusa(query, payload, ts, dev, signingNonce, signingStarted, random32),
+			"x-medusa": buildMedusa(query, payload, ts, dev, signingNonce, signingStarted, random32, q.Get("version_name")),
 			"x-tt-dt":  "", "x-tt-store-region": "cn", "x-tt-store-region-src": "did",
 		} {
 			req.Header.Set(k, v)
 		}
+		if payload != nil {
+			req.Header.Set("x-ss-stub", strings.ToUpper(hex.EncodeToString(bodyHash[:])))
+		} else {
+			req.Header.Del("Content-Type")
+			req.Header.Set("x-tt-request-tag", "t=0;n=0")
+			req.Header.Set("passport-sdk-version", "50561")
+		}
+		if dev.Cookie != "" {
+			req.Header.Set("Cookie", dev.Cookie)
+		}
 		return req, nil
 	}
 	return nil, errors.New("无法生成播放请求签名")
+}
+
+// GET has no body: the SDK signs sixteen zero bytes, not MD5 of an empty body.
+func signingBodyHash(body []byte) [16]byte {
+	if body == nil {
+		return [16]byte{}
+	}
+	return md5.Sum(body)
 }
 
 func signingIV(v uint32, data []byte) uint32 {
@@ -118,7 +139,7 @@ func signingChecksum(data []byte) uint32 {
 }
 
 func xGorgon(query string, body []byte, ts uint32, random uint16) string {
-	qh, bh := md5.Sum([]byte(query)), md5.Sum(body)
+	qh, bh := md5.Sum([]byte(query)), signingBodyHash(body)
 	data := join(qh[:4], bh[:4], make([]byte, 4), le32(67503104), be32(ts))
 	key := []byte{0x4a, 0x40, 0x16, byte(random >> 8), 0x47, 0x6c, 1, byte(random)}
 	var s [256]byte
@@ -222,17 +243,17 @@ func deviceProto(id, nonce string, started int64) []byte {
 	return proto(sf(1, 1), sf(2, 2), sf(3, "8662"), sf(4, id), sf(5, nonce), sf(6, "!noperm!"), sf(7, -888888), sf(8, -888888), sf(9, 3), sf(10, -888888), sf(11, "!notset!"), sf(12, "Asia/Shanghai,8"), sf(13, "zh_CN"), sf(14, 4), sf(16, float32(0)), sf(17, float32(0)), sf(18, float32(0)), sf(19, float32(0)), sf(20, float32(0)), sf(21, float32(0)), sf(22, "16"), sf(23, 41), sf(24, 36), sf(25, started), sf(26, started), sf(27, started), sf(28, started), sf(29, -1), sf(30, "25053RT47C"), sf(31, "Redmi"), sf(32, "25053RT47C"), sf(33, "25053RT47C"), sf(34, "Xiaomi"), sf(35, "Redmi"), sf(36, "Redmi"), sf(38, 31))
 }
 
-func buildMedusa(query string, body []byte, ts uint32, dev *device, nonce string, started int64, nextRandom func() uint32) string {
-	bh := md5.Sum(body)
+func buildMedusa(query string, body []byte, ts uint32, dev *device, nonce string, started int64, nextRandom func() uint32, versionName string) string {
+	bh := signingBodyHash(body)
 	qh := sm3([]byte(query))
 	f13 := hashF13(qh, bh[:], ts)
 	nested := proto(sf(1, 111), sf(2, 10), sf(3, 694367), sf(5, 586952199))
 	messageRand := nextRandom()
 	envLaunch := int(uint64(nextRandom())*21>>32) + 100
 	envPID := int(uint64(nextRandom())*2000>>32) + 10001
-	env := proto(sf(1, envLaunch), sf(2, 146331399), sf(3, 146331396), sf(5, 7), sf(6, "v04.06.04.03-bugfix"), sf(7, envPID), sf(12, deviceProto(dev.DeviceID, nonce, started)), sf(13, proto(sf(1, ts), sf(2, -2), sf(4, 200))), sf(14, deviceQuery["version_name"]))
+	env := proto(sf(1, envLaunch), sf(2, 146331399), sf(3, 146331396), sf(5, 7), sf(6, "v04.06.04.03-bugfix"), sf(7, envPID), sf(12, deviceProto(dev.DeviceID, nonce, started)), sf(13, proto(sf(1, ts), sf(2, -2), sf(4, 200))), sf(14, versionName))
 	queryHash := sm3(join([]byte(query), bh[:], []byte("none")))
-	message := proto(sf(1, unhex("f7e85ffad7d7dc3bd62ac87057cf6118")), sf(2, 3), sf(3, messageRand), sf(4, "8662"), sf(5, dev.DeviceID), sf(6, "1588093228"), sf(7, deviceQuery["version_name"]), sf(8, "v04.06.04-ml-android"), sf(9, 67503104), sf(10, unhex("4001000000000000")), sf(12, ts), sf(13, f13), sf(14, qh[:6]), sf(15, nested), sf(16, nonce), sf(17, ts), sf(19, queryHash), sf(20, "none"), sf(21, 312), sf(23, env), sf(24, `{"cmr":16777216,"cmr2":16777216,"un_h":1879194040,"vpn":0,"kd":0,"fkd":3672518972,"pd":-1872573247,"dyn":"","do":0,"tk":true}`))
+	message := proto(sf(1, unhex("f7e85ffad7d7dc3bd62ac87057cf6118")), sf(2, 3), sf(3, messageRand), sf(4, "8662"), sf(5, dev.DeviceID), sf(6, "1588093228"), sf(7, versionName), sf(8, "v04.06.04-ml-android"), sf(9, 67503104), sf(10, unhex("4001000000000000")), sf(12, ts), sf(13, f13), sf(14, qh[:6]), sf(15, nested), sf(16, nonce), sf(17, ts), sf(19, queryHash), sf(20, "none"), sf(21, 312), sf(23, env), sf(24, `{"cmr":16777216,"cmr2":16777216,"un_h":1879194040,"vpn":0,"kd":0,"fkd":3672518972,"pd":-1872573247,"dyn":"","do":0,"tk":true}`))
 	random := nextRandom()
 	signKey := unhex("8ebdfa3806ecc5cee79423e6029ed82540bc2218bb7eaef71cb691f7aa8aa2f5")
 	hash := sm3(join(signKey, le32(random), signKey))
@@ -334,7 +355,7 @@ func sm3(data []byte) []byte {
 	return out
 }
 
-// Only branch 0 is emitted: playbackRequest searches _rticket before signing.
+// Only branch 0 is emitted: signedRequest searches _rticket before signing.
 func hashF13(q, body []byte, ts uint32) []byte {
 	iv := signingIV(signingIV(signingIV(0x20230928, q), body), le32(ts))
 	index := ((iv & 15) * 171) >> 9

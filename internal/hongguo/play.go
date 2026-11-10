@@ -30,7 +30,9 @@ import (
 
 const (
 	registerURL = "https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1"
-	videoAPI    = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/"
+	appAPIBase  = "https://api5-normal-sinfonlineb.fqnovel.com"
+	videoAPI    = appAPIBase + "/novel/player/multi_video_model/v1/"
+	tabVideoAPI = appAPIBase + "/reading/bookapi/video_tab/multi_video_model/v1/"
 	videoUA     = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 	playbackUA  = "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
 	registerUA  = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
@@ -47,30 +49,37 @@ var deviceQuery = map[string]string{
 	"compliance_status": "0", "need_personal_recommend": "1", "player_so_load": "1", "is_android_pad_screen": "0",
 }
 
-// device is an anonymous playback identity, registered once per process.
-type device struct{ DeviceID, IID, CDID string }
+// device is an anonymous identity for one signed API request. The service
+// may stop answering it after a successful request, so callers must not share it.
+type device struct {
+	DeviceID, IID, CDID string
+	Cookie              string // anonymous registration cookies, kept in memory only
+}
 
 var (
 	deviceMu    sync.Mutex
-	cachedDev   *device
 	deviceRetry time.Time
 )
 
-func getDevice(ctx context.Context, renew bool) (*device, error) {
+func newDevice(ctx context.Context) (*device, error) {
 	deviceMu.Lock()
 	defer deviceMu.Unlock()
-	if cachedDev != nil && !renew {
-		return cachedDev, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if time.Now().Before(deviceRetry) {
 		return nil, errors.New("匿名播放设备注册失败，请稍后重试")
 	}
-	d, err := registerDevice(ctx)
+	registrationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	d, err := registerDevice(registrationCtx)
 	if err != nil {
-		deviceRetry = time.Now().Add(10 * time.Second)
+		if ctx.Err() == nil {
+			deviceRetry = time.Now().Add(10 * time.Second)
+		}
 		return nil, err
 	}
-	cachedDev = d
+	deviceRetry = time.Time{}
 	return d, nil
 }
 
@@ -139,19 +148,23 @@ func registerDevice(ctx context.Context) (*device, error) {
 	} {
 		req.Header.Set(k, v)
 	}
-	body, err := doJSON(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("匿名播放设备注册失败：%w", err)
 	}
-	var res map[string]any
+	body, err := readJSONResponse(res)
+	if err != nil {
+		return nil, fmt.Errorf("匿名播放设备注册失败：%w", err)
+	}
+	var dataRes map[string]any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	if err := dec.Decode(&res); err != nil {
+	if err := dec.Decode(&dataRes); err != nil {
 		return nil, errors.New("匿名播放设备注册失败：响应无效")
 	}
 	id := func(name string) string {
 		for _, k := range []string{name + "_str", name} {
-			switch v := res[k].(type) {
+			switch v := dataRes[k].(type) {
 			case string:
 				if vidPattern.MatchString(v) && strings.Trim(v, "0") != "" {
 					return v
@@ -168,6 +181,14 @@ func registerDevice(ctx context.Context) (*device, error) {
 	if d.DeviceID == "" || d.IID == "" {
 		return nil, errors.New("匿名播放设备注册失败：未返回设备编号")
 	}
+	var cookies []string
+	for _, cookie := range res.Cookies() {
+		switch cookie.Name {
+		case "install_id", "ttreq", "store-region", "store-region-src":
+			cookies = append(cookies, (&http.Cookie{Name: cookie.Name, Value: cookie.Value}).String())
+		}
+	}
+	d.Cookie = strings.Join(cookies, "; ")
 	return d, nil
 }
 
@@ -183,6 +204,10 @@ func doJSON(req *http.Request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readJSONResponse(res)
+}
+
+func readJSONResponse(res *http.Response) ([]byte, error) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", res.StatusCode)
@@ -195,6 +220,122 @@ func doJSON(req *http.Request) ([]byte, error) {
 		return nil, errEmpty
 	}
 	return body, nil
+}
+
+// signedJSON gives each request its own identity, including concurrent playback
+// and season lookups. An empty response gets one fresh identity and an alternate
+// API route, matching upstream's recovery path. Bound the whole operation so an
+// unavailable service cannot trigger a burst of registrations or a long wait.
+func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	dev, err := newDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for attempt := 0; ; attempt++ {
+		req, err := signedRequest(ctx, api, payload, dev, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		body, err := doJSON(req)
+		if err == nil {
+			return body, nil
+		}
+		if !errors.Is(err, errEmpty) || attempt == 1 {
+			return nil, err
+		}
+		timer := time.NewTimer(300 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if dev, err = newDevice(ctx); err != nil {
+			return nil, err
+		}
+		api = strings.Replace(api, appAPIBase+"/", "https://api5-normal-hl.fqnovel.com/", 1)
+	}
+}
+
+// loadVideoModel prefers the current official video_tab API. The old POST
+// endpoint can return HTTP 200 with no body even for a new registered device;
+// rotating identities alone cannot recover that route. Keep its bounded retry
+// as a fallback for content not supplied by video_tab.
+// Parameters and response shape follow tsukiyo-zero/hongguoTV's
+// ContentRepository.tabVideoModel (GPL-3.0-only).
+func loadVideoModel(ctx context.Context, vid string) (*videoInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	dev, err := newDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	params := url.Values{
+		"video_id": {vid}, "video_id_type": {"0"}, "device_level": {"1"},
+		"need_all_video_definition": {"1"}, "need_mp4_align": {"0"},
+		"use_os_player": {"0"}, "video_platform": {"1024"}, "source": {"0"}, "from_video_id": {""},
+		"version_code": {"73932"}, "version_name": {"7.3.9.32"}, "manifest_version_code": {"73932"},
+		"update_version_code": {"73932"}, "pv_player": {"73932"},
+	}
+	req, err := signedAPIRequest(ctx, http.MethodGet, tabVideoAPI, params, nil, dev, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if body, err := doJSON(req); err == nil {
+		if model, err := parseVideoModel(body, vid); err == nil && len(model.rows()) > 0 {
+			return model, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"biz_param": map[string]any{"detail_page_version": 0, "device_level": 3, "disable_digg_stat": false,
+			"need_all_video_definition": true, "need_mp4_align": false, "use_os_player": false,
+			"use_server_dns": false, "video_platform": 1024},
+		"mixed_video_id_map": map[string]any{"1004": []string{vid}},
+	})
+	body, err := signedJSON(ctx, videoAPI, payload)
+	if err != nil {
+		return nil, err
+	}
+	return parseVideoModel(body, vid)
+}
+
+func parseVideoModel(body []byte, vid string) (*videoInfo, error) {
+	var res struct {
+		Code json.Number                `json:"code"`
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, errors.New("播放接口返回无效数据")
+	}
+	if c := res.Code.String(); c != "" && c != "0" {
+		return nil, errors.New("接口暂未提供本集播放信息")
+	}
+	if nested, ok := res.Data["video_model_data"]; ok {
+		if err := json.Unmarshal(nested, &res.Data); err != nil {
+			return nil, errors.New("播放接口返回无效数据")
+		}
+	}
+	var entry struct {
+		VideoModel json.RawMessage `json:"video_model"`
+	}
+	if err := json.Unmarshal(res.Data[vid], &entry); err != nil || len(entry.VideoModel) == 0 {
+		return nil, errors.New("接口未返回本集片源")
+	}
+	modelJSON := []byte(entry.VideoModel)
+	var s string
+	if json.Unmarshal(modelJSON, &s) == nil {
+		modelJSON = []byte(s)
+	}
+	var model videoInfo
+	if err := json.Unmarshal(modelJSON, &model); err != nil {
+		return nil, errors.New("片源数据无法解析")
+	}
+	return &model, nil
 }
 
 // PlayInfo is where an episode's media is and how to decrypt it.
@@ -219,63 +360,13 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 	if !vidPattern.MatchString(vid) {
 		return nil, errors.New("分集编号无效")
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"biz_param": map[string]any{"detail_page_version": 0, "device_level": 3, "disable_digg_stat": false,
-			"need_all_video_definition": true, "need_mp4_align": false, "use_os_player": false,
-			"use_server_dns": false, "video_platform": 1024},
-		"mixed_video_id_map": map[string]any{"1004": []string{vid}},
-	})
-	dev, err := getDevice(ctx, false)
+	model, err := loadVideoModel(ctx, vid)
 	if err != nil {
-		return nil, err
-	}
-	var body []byte
-	for attempt := 0; attempt < 2; attempt++ {
-		req, signErr := playbackRequest(ctx, payload, dev, time.Now())
-		if signErr != nil {
-			return nil, signErr
-		}
-		body, err = doJSON(req)
-		if err == nil {
-			break
-		}
-		if attempt == 0 && errors.Is(err, errEmpty) {
-			if dev, err = getDevice(ctx, true); err != nil {
-				return nil, err
-			}
-			continue
-		}
 		return nil, fmt.Errorf("取源失败：%w", err)
-	}
-
-	var res struct {
-		Code json.Number                `json:"code"`
-		Data map[string]json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(body, &res); err != nil {
-		return nil, errors.New("播放接口返回无效数据")
-	}
-	if c := res.Code.String(); c != "" && c != "0" {
-		return nil, errors.New("接口暂未提供本集播放信息")
-	}
-	var entry struct {
-		VideoModel json.RawMessage `json:"video_model"`
-	}
-	if err := json.Unmarshal(res.Data[vid], &entry); err != nil || len(entry.VideoModel) == 0 {
-		return nil, errors.New("接口未返回本集片源")
-	}
-	modelJSON := []byte(entry.VideoModel)
-	var s string
-	if json.Unmarshal(modelJSON, &s) == nil {
-		modelJSON = []byte(s)
-	}
-	var model videoInfo
-	if err := json.Unmarshal(modelJSON, &model); err != nil {
-		return nil, errors.New("片源数据无法解析")
 	}
 	rows := model.rows()
 	inline := len(rows) > 0
-	info := model
+	info := *model
 	ua := playbackUA
 	if !inline {
 		fallback := parseFallback(model.FallbackAPI)
