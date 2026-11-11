@@ -340,8 +340,10 @@ func parseVideoModel(body []byte, vid string) (*videoInfo, error) {
 
 // PlayInfo is where an episode's media is and how to decrypt it.
 type PlayInfo struct {
-	VID        string
-	URL        string
+	VID string
+	URL string
+	// BackupURLs belong to the same rendition and use the same content key.
+	BackupURLs []string
 	ContentKey string // hex AES-128 key for CENC, empty when not encrypted
 	Codec      string
 	Quality    string
@@ -463,6 +465,8 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 			}
 			key = hex.EncodeToString(k)
 		}
+		var urls []string
+		seen := map[string]bool{}
 		for _, raw := range append([]string{c.item.MainURL, c.item.BackupURL}, c.item.BackupURLList...) {
 			if raw == "" {
 				continue
@@ -483,16 +487,26 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 				lastErr = err
 				continue
 			}
-			codec := c.codec
-			if codec == "bytevc1" {
-				codec = "hevc"
+			if !seen[media] {
+				seen[media] = true
+				urls = append(urls, media)
+				if len(urls) == maxMediaURLs {
+					break
+				}
 			}
-			quality := ""
-			if c.pixels > 0 {
-				quality = strconv.Itoa(c.pixels) + "P"
-			}
-			return &PlayInfo{VID: vid, URL: media, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h, Qualities: qualities}, nil
 		}
+		if len(urls) == 0 {
+			continue
+		}
+		codec := c.codec
+		if codec == "bytevc1" {
+			codec = "hevc"
+		}
+		quality := ""
+		if c.pixels > 0 {
+			quality = strconv.Itoa(c.pixels) + "P"
+		}
+		return &PlayInfo{VID: vid, URL: urls[0], BackupURLs: urls[1:], ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h, Qualities: qualities}, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("本集片源地址无法解析")

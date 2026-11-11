@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -17,6 +19,70 @@ import (
 	"testing"
 	"time"
 )
+
+// Independent 551 vectors include a zero nonce, empty query/body, and a nonce
+// above MaxInt32. The former timestamp placeholders cannot satisfy these.
+func TestPlayback551Vectors(t *testing.T) {
+	b, err := os.ReadFile("testdata/playback-551.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct {
+		Query, Body, Argus, Ladon string
+		TS, Nonce                 uint32
+	}
+	if err := json.Unmarshal(b, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	for i, v := range vectors {
+		if got := playbackArgus(v.Query, []byte(v.Body), v.TS, v.Nonce); got != v.Argus {
+			t.Errorf("vector %d: Argus differs from reference", i)
+		}
+		q, _ := url.ParseQuery(v.Query)
+		if got := playbackLadon(v.TS, firstNonEmpty(q.Get("aid"), "1967"), 0x04030201); got != v.Ladon {
+			t.Errorf("vector %d: Ladon differs from reference", i)
+		}
+		for _, got := range []string{
+			playbackArgus(v.Query+"&video_id=changed", []byte(v.Body), v.TS, v.Nonce),
+			playbackArgus(v.Query, []byte(v.Body+" "), v.TS, v.Nonce),
+			playbackArgus(v.Query, []byte(v.Body), v.TS+1, v.Nonce),
+			playbackArgus(v.Query, []byte(v.Body), v.TS, v.Nonce^1),
+		} {
+			if got == v.Argus {
+				t.Fatalf("vector %d: Argus did not bind its inputs", i)
+			}
+		}
+	}
+}
+
+func TestPlaybackModelRequestSignature(t *testing.T) {
+	dev := &device{DeviceID: "1234567890123456789", IID: "2345678901234567890"}
+	for _, api := range []string{videoAPI, "https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/v1/", detailAPI, tabVideoAPI} {
+		t.Run(api, func(t *testing.T) {
+			req, err := signedRequest(context.Background(), api, []byte(`{"video_id":"123"}`), dev, time.Unix(1800000000, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			argus, _ := base64.StdEncoding.DecodeString(req.Header.Get("X-Argus"))
+			ladon, _ := base64.StdEncoding.DecodeString(req.Header.Get("X-Ladon"))
+			if req.URL.Path == "/novel/player/multi_video_model/v1/" {
+				if len(argus) < 64 || !bytes.HasPrefix(argus, []byte{0xf2, 0x81}) {
+					t.Error("playback request lacks full Argus 551")
+				}
+				if len(ladon) != 36 {
+					t.Error("playback request lacks full Ladon")
+				}
+				if req.Header.Get("X-Medusa") != "" {
+					t.Error("playback sends a conflicting Medusa envelope")
+				}
+			} else {
+				if req.Header.Get("X-Medusa") == "" || len(argus) != 4 || len(ladon) != 4 {
+					t.Error("unrelated API signing profile changed")
+				}
+			}
+		})
+	}
+}
 
 func TestSM3(t *testing.T) {
 	for _, v := range []struct{ input, want string }{
@@ -116,10 +182,13 @@ func TestResolvePlaySignsRequestsAndRenewal(t *testing.T) {
 			t.Fatal(err)
 		}
 		payloads = append(payloads, b)
-		for _, h := range []string{"x-ss-req-ticket", "sdk-version", "x-khronos", "x-gorgon", "x-ladon", "x-argus", "x-helios", "x-medusa", "x-tt-store-region", "x-tt-store-region-src"} {
+		for _, h := range []string{"x-ss-req-ticket", "sdk-version", "x-khronos", "x-gorgon", "x-ladon", "x-argus", "x-helios", "x-tt-store-region", "x-tt-store-region-src"} {
 			if req.Header.Get(h) == "" {
 				t.Errorf("play request %d missing %s", playCalls, h)
 			}
+		}
+		if req.Header.Get("x-medusa") != "" {
+			t.Error("playback renewal reintroduced Medusa")
 		}
 		q := req.URL.Query()
 		if q.Get("_rticket") != req.Header.Get("x-ss-req-ticket") || q.Get("ts") != req.Header.Get("x-khronos") {
@@ -204,6 +273,32 @@ func TestResolvePlayQuality(t *testing.T) {
 		if fmt.Sprint(info.Qualities) != "[1080 720 540]" {
 			t.Errorf("qualities %v", info.Qualities)
 		}
+	}
+}
+
+// A valid primary can still return 403 at download time. Keep the same
+// rendition's alternate CDNs instead of losing them during resolution.
+func TestResolvePlayPreservesRenditionBackups(t *testing.T) {
+	oldClient := httpClient
+	t.Cleanup(func() { httpClient = oldClient })
+	httpClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/service/2/device_register/" {
+			return jsonResponse(`{"device_id_str":"1234567890123456789","install_id_str":"2345678901234567890"}`), nil
+		}
+		return jsonResponse(`{"code":0,"data":{"video_model_data":{"123":{"video_model":{"video_list":[
+			{"main_url":"https://primary.fqnovelvod.com/1080.mp4","backup_url":"https://backup.fqnovelvod.com/1080.mp4","backup_url_list":["https://primary.fqnovelvod.com/1080.mp4","https://untrusted.example/1080.mp4","https://third.fqnovelvod.com/1080.mp4","https://fourth.fqnovelvod.com/1080.mp4"],"codec_type":"bytevc1","width":1920,"height":1080},
+			{"main_url":"https://primary.fqnovelvod.com/720.mp4","backup_url":"https://backup.fqnovelvod.com/720.mp4","codec_type":"h264","width":1280,"height":720}
+		]}}}}}`), nil
+	})}
+	info, err := ResolvePlay(context.Background(), "123", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.URL != "https://primary.fqnovelvod.com/1080.mp4" || info.Quality != "1080P" || info.Codec != "hevc" {
+		t.Fatalf("unexpected primary: %+v", info)
+	}
+	if got := strings.Join(info.BackupURLs, ","); got != "https://backup.fqnovelvod.com/1080.mp4,https://third.fqnovelvod.com/1080.mp4" {
+		t.Fatalf("backups crossed renditions, retained duplicates/untrusted hosts, or exceeded the bound: %s", got)
 	}
 }
 
