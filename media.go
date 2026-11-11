@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -176,24 +177,8 @@ func (l *library) ensure(key string) *job {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		vid, px := splitKey(key)
-		info, err := resolvePlay(ctx, vid, px)
-		if err != nil {
-			j.err = err
-			j.phase.Store("error")
-			return
-		}
-		l.setQualities(vid, info.Qualities)
-		j.quality.Store(info.Quality)
-		j.width.Store(int64(info.Width))
-		j.height.Store(int64(info.Height))
-		j.phase.Store("downloading")
 		part := l.partPath(key)
-		if err := os.WriteFile(part, nil, 0o644); err != nil {
-			j.err = err
-			j.phase.Store("error")
-			return
-		}
-		err = hongguo.Download(ctx, info, l.path(key), func(p hongguo.Progress) {
+		progress := func(p hongguo.Progress) {
 			j.received.Store(p.Received)
 			j.total.Store(p.Total)
 			j.ready.Store(p.Ready)
@@ -204,7 +189,32 @@ func (l *library) ensure(key string) *job {
 				j.phase.Store("decrypting")
 			}
 			j.notify()
-		})
+		}
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			j.phase.Store("resolving")
+			j.notify()
+			var info *hongguo.PlayInfo
+			info, err = resolvePlay(ctx, vid, px)
+			if err != nil {
+				break
+			}
+			l.setQualities(vid, info.Qualities)
+			j.quality.Store(info.Quality)
+			j.width.Store(int64(info.Width))
+			j.height.Store(int64(info.Height))
+			j.phase.Store("downloading")
+			if err = os.WriteFile(part, nil, 0o644); err != nil {
+				break
+			}
+			err = hongguo.Download(ctx, info, l.path(key), progress)
+			// Download already tried this rendition's backup CDNs. Only an
+			// address rejection before any body was accepted may refresh the
+			// model, once, with the same episode and requested resolution.
+			if !errors.Is(err, hongguo.ErrMediaUnavailable) || ctx.Err() != nil {
+				break
+			}
+		}
 		if err != nil {
 			j.err = err
 			j.phase.Store("error")

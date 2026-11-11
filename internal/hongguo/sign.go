@@ -89,6 +89,14 @@ func signedAPIRequest(ctx context.Context, method, api string, params url.Values
 		} {
 			req.Header.Set(k, v)
 		}
+		if req.URL.Path == "/novel/player/multi_video_model/v1/" {
+			// The legacy playback API now requires the full 551 envelope. Its
+			// timestamp placeholders and Medusa combination return HTTP 200 with
+			// an empty body; keep other app APIs on their existing SDK profile.
+			req.Header.Set("x-argus", playbackArgus(query, payload, ts, random32()))
+			req.Header.Set("x-ladon", playbackLadon(ts, q.Get("aid"), random32()))
+			req.Header.Del("x-medusa")
+		}
 		if payload != nil {
 			req.Header.Set("x-ss-stub", strings.ToUpper(hex.EncodeToString(bodyHash[:])))
 		} else {

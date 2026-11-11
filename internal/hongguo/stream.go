@@ -32,6 +32,73 @@ type Progress struct {
 	Decrypting bool
 }
 
+// ErrMediaUnavailable means a CDN rejected an address before any video bytes
+// were published. The caller may resolve the episode once more for fresh URLs.
+// A 403 alone cannot distinguish expiry from a temporary CDN rejection.
+var ErrMediaUnavailable = errors.New("片源地址暂不可用")
+
+type mediaStatusError int
+
+func (e mediaStatusError) Error() string {
+	return fmt.Sprintf("视频下载失败（HTTP %d）", e)
+}
+
+func (e mediaStatusError) Is(target error) bool {
+	if target != ErrMediaUnavailable {
+		return false
+	}
+	switch int(e) {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return true
+	}
+	return false
+}
+
+const maxMediaURLs = 3
+
+// openMedia tries the rendition's primary and backup CDNs, bounded to three
+// distinct URLs. Recovery ends once a body is accepted: never splice streams
+// after publishing bytes to a growing file the player may already have open.
+func openMedia(ctx context.Context, info *PlayInfo) (*http.Response, error) {
+	var lastErr error
+	seen := map[string]bool{}
+	for _, raw := range append([]string{info.URL}, info.BackupURLs...) {
+		if raw == "" || seen[raw] {
+			continue
+		}
+		if len(seen) == maxMediaURLs {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		seen[raw] = true
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", info.UserAgent)
+		res, err := mediaClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("视频下载失败：%w", err)
+			continue
+		}
+		if res.StatusCode == http.StatusOK {
+			return res, nil
+		}
+		res.Body.Close()
+		lastErr = mediaStatusError(res.StatusCode)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("接口未返回本集片源地址")
+	}
+	return nil, lastErr
+}
+
 // Download saves an episode's media, decrypted, to dst, telling progress
 // as it goes. When it can, it writes dst in place from its start, so that
 // a player reads the episode while it downloads; otherwise dst appears
@@ -40,19 +107,11 @@ func Download(ctx context.Context, info *PlayInfo, dst string, progress func(Pro
 	if progress == nil {
 		progress = func(Progress) {}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
+	res, err := openMedia(ctx, info)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", info.UserAgent)
-	res, err := mediaClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("视频下载失败：%w", err)
-	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("视频下载失败（HTTP %d）", res.StatusCode)
-	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
