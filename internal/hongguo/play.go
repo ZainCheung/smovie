@@ -49,16 +49,21 @@ var deviceQuery = map[string]string{
 	"compliance_status": "0", "need_personal_recommend": "1", "player_so_load": "1", "is_android_pad_screen": "0",
 }
 
-// device is an anonymous identity for one signed API request. The service
-// may stop answering it after a successful request, so callers must not share it.
+// device is an anonymous identity. The playback profile can reuse a
+// successful identity; other SDK profiles still receive fresh identities.
 type device struct {
 	DeviceID, IID, CDID string
 	Cookie              string // anonymous registration cookies, kept in memory only
 }
 
 var (
-	deviceMu    sync.Mutex
-	deviceRetry time.Time
+	deviceMu       sync.Mutex
+	deviceRetry    time.Time
+	deviceRetryErr error
+	// The gate serializes playback API calls and protects playbackDevice.
+	// Waiting callers can cancel without registering another device.
+	playbackGate   = make(chan struct{}, 1)
+	playbackDevice *device
 )
 
 func newDevice(ctx context.Context) (*device, error) {
@@ -68,6 +73,11 @@ func newDevice(ctx context.Context) (*device, error) {
 		return nil, err
 	}
 	if time.Now().Before(deviceRetry) {
+		// Concurrent playback and prefetch may hit the cooldown first. Keep
+		// the original cause so a timeout or HTTP rejection is not hidden.
+		if deviceRetryErr != nil {
+			return nil, deviceRetryErr
+		}
 		return nil, errors.New("匿名播放设备注册失败，请稍后重试")
 	}
 	registrationCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -76,10 +86,16 @@ func newDevice(ctx context.Context) (*device, error) {
 	if err != nil {
 		if ctx.Err() == nil {
 			deviceRetry = time.Now().Add(10 * time.Second)
+			var status *apiStatusError
+			if errors.As(err, &status) && status.retryAt.After(deviceRetry) {
+				deviceRetry = status.retryAt
+			}
+			deviceRetryErr = err
 		}
 		return nil, err
 	}
 	deviceRetry = time.Time{}
+	deviceRetryErr = nil
 	return d, nil
 }
 
@@ -199,6 +215,13 @@ func pkcs7(b []byte) []byte {
 
 var errEmpty = errors.New("接口返回空响应")
 
+type apiStatusError struct {
+	status  int
+	retryAt time.Time
+}
+
+func (e *apiStatusError) Error() string { return fmt.Sprintf("HTTP %d", e.status) }
+
 func doJSON(req *http.Request) ([]byte, error) {
 	res, err := httpClient.Do(req)
 	if err != nil {
@@ -210,7 +233,14 @@ func doJSON(req *http.Request) ([]byte, error) {
 func readJSONResponse(res *http.Response) ([]byte, error) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", res.StatusCode)
+		err := &apiStatusError{status: res.StatusCode}
+		value := strings.TrimSpace(res.Header.Get("Retry-After"))
+		if seconds, parseErr := strconv.ParseUint(value, 10, 32); parseErr == nil {
+			err.retryAt = time.Now().Add(time.Duration(seconds) * time.Second)
+		} else if at, parseErr := http.ParseTime(value); parseErr == nil {
+			err.retryAt = at
+		}
+		return nil, err
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
@@ -222,16 +252,42 @@ func readJSONResponse(res *http.Response) ([]byte, error) {
 	return body, nil
 }
 
-// signedJSON gives each request its own identity, including concurrent playback
-// and season lookups. An empty response gets one fresh identity and an alternate
-// API route, matching upstream's recovery path. Bound the whole operation so an
-// unavailable service cannot trigger a burst of registrations or a long wait.
+// signedJSON reuses the playback identity under a cancellable gate. Other
+// SDK profiles keep fresh identities, isolated from playback. An empty response
+// invalidates the playback identity and gets at most one fresh registration and
+// retry. Explicit HTTP rejections never rotate identities.
 func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	dev, err := newDevice(ctx)
-	if err != nil {
+	playback := api == mobileVideoAPI || api == videoAPI || api == "https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/v1/"
+	if playback {
+		select {
+		case playbackGate <- struct{}{}:
+			defer func() { <-playbackGate }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return signedJSONWithDevice(ctx, api, payload, playback)
+}
+
+// The caller holds playbackGate when playback is true.
+func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playback bool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	var dev *device
+	if playback {
+		dev = playbackDevice
+	}
+	if dev == nil {
+		var err error
+		if dev, err = newDevice(ctx); err != nil {
+			return nil, err
+		}
+		if playback {
+			playbackDevice = dev
+		}
 	}
 	for attempt := 0; ; attempt++ {
 		req, err := signedRequest(ctx, api, payload, dev, time.Now())
@@ -241,6 +297,9 @@ func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error)
 		body, err := doJSON(req)
 		if err == nil {
 			return body, nil
+		}
+		if playback && errors.Is(err, errEmpty) {
+			playbackDevice = nil
 		}
 		if !errors.Is(err, errEmpty) || attempt == 1 {
 			return nil, err
@@ -255,49 +314,18 @@ func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error)
 		if dev, err = newDevice(ctx); err != nil {
 			return nil, err
 		}
+		if playback {
+			playbackDevice = dev
+		}
 		api = strings.Replace(api, appAPIBase+"/", "https://api5-normal-hl.fqnovel.com/", 1)
 	}
 }
 
-// loadVideoModel prefers the current official video_tab API. The old POST
-// endpoint can return HTTP 200 with no body even for a new registered device;
-// rotating identities alone cannot recover that route. Keep its bounded retry
-// as a fallback for content not supplied by video_tab.
-// Parameters and response shape follow tsukiyo-zero/hongguoTV's
-// ContentRepository.tabVideoModel (GPL-3.0-only).
+// loadVideoModel uses the current mobile v5 player protocol. The deprecated
+// video_tab and 551 endpoints return empty 200s even after successful device
+// registration; probing them first only amplifies registration traffic.
 func loadVideoModel(ctx context.Context, vid string) (*videoInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	dev, err := newDevice(ctx)
-	if err != nil {
-		return nil, err
-	}
-	params := url.Values{
-		"video_id": {vid}, "video_id_type": {"0"}, "device_level": {"1"},
-		"need_all_video_definition": {"1"}, "need_mp4_align": {"0"},
-		"use_os_player": {"0"}, "video_platform": {"1024"}, "source": {"0"}, "from_video_id": {""},
-		"version_code": {"73932"}, "version_name": {"7.3.9.32"}, "manifest_version_code": {"73932"},
-		"update_version_code": {"73932"}, "pv_player": {"73932"},
-	}
-	req, err := signedAPIRequest(ctx, http.MethodGet, tabVideoAPI, params, nil, dev, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	if body, err := doJSON(req); err == nil {
-		if model, err := parseVideoModel(body, vid); err == nil && len(model.rows()) > 0 {
-			return model, nil
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"biz_param": map[string]any{"detail_page_version": 0, "device_level": 3, "disable_digg_stat": false,
-			"need_all_video_definition": true, "need_mp4_align": false, "use_os_player": false,
-			"use_server_dns": false, "video_platform": 1024},
-		"mixed_video_id_map": map[string]any{"1004": []string{vid}},
-	})
-	body, err := signedJSON(ctx, videoAPI, payload)
+	body, err := signedJSON(ctx, mobileVideoAPI, mobileVideoPayload(vid))
 	if err != nil {
 		return nil, err
 	}
@@ -316,6 +344,11 @@ func parseVideoModel(body []byte, vid string) (*videoInfo, error) {
 		return nil, errors.New("接口暂未提供本集播放信息")
 	}
 	if nested, ok := res.Data["video_model_data"]; ok {
+		if err := json.Unmarshal(nested, &res.Data); err != nil {
+			return nil, errors.New("播放接口返回无效数据")
+		}
+	}
+	if nested, ok := res.Data["1004"]; ok {
 		if err := json.Unmarshal(nested, &res.Data); err != nil {
 			return nil, errors.New("播放接口返回无效数据")
 		}

@@ -45,6 +45,9 @@ func join(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
 // signedRequest is a POST of payload to an app API, signed as playback's.
 func signedRequest(ctx context.Context, api string, payload []byte, dev *device, now time.Time) (*http.Request, error) {
+	if api == mobileVideoAPI {
+		return signedMobileRequest(ctx, payload, dev, now)
+	}
 	return signedAPIRequest(ctx, http.MethodPost, api, nil, payload, dev, now)
 }
 
@@ -176,6 +179,10 @@ func xGorgon(query string, body []byte, ts uint32, random uint16) string {
 }
 
 func helios(ts, random uint32) string {
+	return heliosWithLicense(ts, random, "1588093228")
+}
+
+func heliosWithLicense(ts, random uint32, license string) string {
 	digest := md5.Sum(join(le32(random), []byte("8662")))
 	ascii := []byte(hex.EncodeToString(digest[:]))
 	words := []uint64{}
@@ -193,7 +200,7 @@ func helios(ts, random uint32) string {
 		b0, b8 = x, words[0]
 		words = words[1:]
 	}
-	plain := pkcs7([]byte(fmt.Sprintf("%d-1588093228-8662", ts)))
+	plain := pkcs7([]byte(fmt.Sprintf("%d-%s-8662", ts, license)))
 	out := le32(random)
 	for at := 0; at < len(plain); at += 16 {
 		a, b := binary.LittleEndian.Uint64(plain[at:]), binary.LittleEndian.Uint64(plain[at+8:])
@@ -365,9 +372,16 @@ func sm3(data []byte) []byte {
 
 // Only branch 0 is emitted: signedRequest searches _rticket before signing.
 func hashF13(q, body []byte, ts uint32) []byte {
+	return hashF13Profile(q, body, ts, false)
+}
+
+func hashF13Profile(q, body []byte, ts uint32, v5 bool) []byte {
 	iv := signingIV(signingIV(signingIV(0x20230928, q), body), le32(ts))
 	index := ((iv & 15) * 171) >> 9
 	iv1 := []uint32{0xc4a78580, 0xb3c0fd39, 0xc58c5686, 0xc9aa3ba7, 0xf5a7adf2, 0x963c2ed1}[index]
+	if v5 {
+		iv1 = 0x9d4a97c2
+	}
 	count2 := iv1 + ts
 	var tt [64]uint32
 	for i, v := range f13Table {
@@ -393,6 +407,9 @@ func hashF13(q, body []byte, ts uint32) []byte {
 		initial[i] = bits.RotateLeft32(initial[i], -int(count2&31))
 	}
 	chosen := [6][11]int{{101, 5, 7, 6, 3, 2, 1, 0, 5, 4, 3}, {96, 0, 6, 7, 5, 3, 2, 1, 5, 4, 4}, {96, 7, 6, 2, 1, 4, 0, 5, 4, 3, 5}, {99, 3, 6, 2, 4, 5, 1, 0, 0, 7, 6}, {96, 0, 5, 6, 7, 3, 1, 2, 5, 4, 4}, {100, 2, 0, 3, 5, 4, 6, 7, 2, 1, 5}}[index]
+	if v5 {
+		chosen = [11]int{96, 1, 3, 4, 0, 6, 5, 2, 0, 7, 7}
+	}
 	d := initial
 	for i := 0; i < chosen[0]; i++ {
 		base := iv1 + uint32(i)
@@ -413,24 +430,43 @@ func hashF13(q, body []byte, ts uint32) []byte {
 	for i := 0; i < 16; i++ {
 		out[i] ^= out[i+16]
 	}
-	return join(out[:16], le32(signingChecksum(out[:16])))
+	check := signingChecksum(out[:16])
+	if v5 {
+		check |= 0x20
+	}
+	return join(out[:16], le32(check))
 }
 
 type aesV3 struct {
-	box         []byte
-	permutation [4]int
-	order       [16]int
-	keys        [48]byte
+	box           []byte
+	permutation   [4]int
+	order         [16]int
+	keys          [48]byte
+	wire, compact [8]uint
 }
 
 func newAesV3(key []byte, ts uint32) *aesV3 {
+	return newSigningCarrier(key, ts, false)
+}
+
+func newSigningCarrier(key []byte, ts uint32, v5 bool) *aesV3 {
 	n := ts & 3
 	a := &aesV3{
 		box:         medusaSbox[n*256 : (n+1)*256],
 		permutation: [4][4]int{{1, 0, 2, 3}, {2, 0, 3, 1}, {0, 1, 3, 2}, {1, 0, 2, 3}}[n],
 		order:       [4][16]int{{0, 9, 14, 11, 4, 13, 2, 7, 8, 1, 6, 15, 12, 5, 10, 3}, {0, 9, 14, 15, 4, 13, 2, 7, 8, 1, 6, 3, 12, 5, 10, 11}, {0, 9, 14, 7, 4, 13, 2, 11, 8, 1, 6, 3, 12, 5, 10, 15}, {0, 9, 14, 11, 4, 13, 2, 7, 8, 1, 6, 15, 12, 5, 10, 3}}[n],
 	}
+	a.wire, a.compact = [8]uint{5, 6, 2, 4, 3, 1, 0, 7}, [8]uint{1, 6, 0, 7, 2, 4, 5, 3}
+	if v5 {
+		a.box = mobileSbox[n*256 : (n+1)*256]
+		a.permutation = [4][4]int{{2, 0, 3, 1}, {1, 3, 2, 0}, {3, 2, 1, 0}, {2, 3, 1, 0}}[n]
+		a.order = [4][16]int{{0, 9, 14, 15, 4, 13, 2, 7, 8, 1, 6, 3, 12, 5, 10, 11}, {0, 9, 14, 11, 4, 13, 2, 3, 8, 1, 6, 15, 12, 5, 10, 7}, {0, 9, 14, 3, 4, 13, 2, 15, 8, 1, 6, 11, 12, 5, 10, 7}, {0, 9, 14, 15, 4, 13, 2, 3, 8, 1, 6, 11, 12, 5, 10, 7}}[n]
+		a.wire, a.compact = [8]uint{6, 5, 3, 4, 2, 7, 1, 0}, [8]uint{1, 7, 3, 6, 2, 0, 4, 5}
+	}
 	initial := []uint32{0xca025ddc, 0x823dc546, 0xc9420583, 0xc298225f}[n]
+	if v5 {
+		initial = [4]uint32{0xbbb5de72, 0xd4638d5b, 0x92a5f73b, 0x89f8a1c9}[n]
+	}
 	for i := 0; i < 16; i++ {
 		a.keys[i] = le32(initial)[i%4] ^ key[i]
 	}
@@ -508,8 +544,9 @@ func (a *aesV3) block(value []byte) []byte {
 func (a *aesV3) encrypt(source, iv []byte) []byte {
 	var plain [32]byte
 	for i := 0; i < 31; i++ {
-		at := i * 8
-		plain[i] = (source[at]>>4)&2 | source[at+1]&64 | (source[at+2]>>2)&1 | (source[at+3]<<3)&128 | (source[at+4]>>1)&4 | (source[at+5]<<3)&16 | (source[at+6]<<5)&32 | (source[at+7]>>4)&8
+		for j := 0; j < 8; j++ {
+			plain[i] |= ((source[i*8+j] >> a.wire[j]) & 1) << a.compact[j]
+		}
 	}
 	plain[31] = 1
 	var key []byte
@@ -524,16 +561,10 @@ func (a *aesV3) encrypt(source, iv []byte) []byte {
 	}
 	out := append([]byte(nil), source...)
 	for i := 0; i < 31; i++ {
-		at := i * 8
-		k := key[i]
-		out[at] = out[at]&0xdf | (k<<4)&32
-		out[at+1] = out[at+1]&0xbf | k&64
-		out[at+2] = out[at+2]&0xfb | (k<<2)&4
-		out[at+3] = out[at+3]&0xef | (k>>3)&16
-		out[at+4] = out[at+4]&0xf7 | (k+k)&8
-		out[at+5] = out[at+5]&0xfd | (k>>3)&2
-		out[at+6] = out[at+6]&0xfe | (k>>5)&1
-		out[at+7] = out[at+7]&0x7f | (k<<4)&128
+		for j := 0; j < 8; j++ {
+			at := i*8 + j
+			out[at] = out[at] & ^(byte(1)<<a.wire[j]) | ((key[i]>>a.compact[j])&1)<<a.wire[j]
+		}
 	}
 	return append([]byte{key[len(key)-1]}, out...)
 }
