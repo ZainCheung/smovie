@@ -254,8 +254,8 @@ func readJSONResponse(res *http.Response) ([]byte, error) {
 
 // signedJSON reuses the playback identity under a cancellable gate. Other
 // SDK profiles keep fresh identities, isolated from playback. An empty response
-// invalidates the playback identity and gets at most one fresh registration and
-// retry. Explicit HTTP rejections never rotate identities.
+// from the mobile POST first tries v5 video_tab with the same identity. If both
+// are empty, renew at most once. Explicit HTTP rejections never rotate identities.
 func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -276,6 +276,16 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var tabVID string
+	if api == mobileVideoAPI {
+		var modelRequest struct {
+			Mixed map[string][]string `json:"mixed_video_id_map"`
+		}
+		if json.Unmarshal(payload, &modelRequest) != nil || len(modelRequest.Mixed["1004"]) != 1 || !vidPattern.MatchString(modelRequest.Mixed["1004"][0]) {
+			return nil, errors.New("分集编号无效")
+		}
+		tabVID = modelRequest.Mixed["1004"][0]
+	}
 	var dev *device
 	if playback {
 		dev = playbackDevice
@@ -295,6 +305,13 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 			return nil, err
 		}
 		body, err := doJSON(req)
+		if errors.Is(err, errEmpty) && tabVID != "" {
+			// The model route may be unavailable while the registered identity
+			// still works on video_tab. Keep the deadline and exact episode.
+			if req, err = signedMobileTabRequest(ctx, tabVID, dev, time.Now()); err == nil {
+				body, err = doJSON(req)
+			}
+		}
 		if err == nil {
 			return body, nil
 		}
@@ -321,9 +338,7 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 	}
 }
 
-// loadVideoModel uses the current mobile v5 player protocol. The deprecated
-// video_tab and 551 endpoints return empty 200s even after successful device
-// registration; probing them first only amplifies registration traffic.
+// loadVideoModel uses v5 player signing for both POST and video_tab recovery.
 func loadVideoModel(ctx context.Context, vid string) (*videoInfo, error) {
 	body, err := signedJSON(ctx, mobileVideoAPI, mobileVideoPayload(vid))
 	if err != nil {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Android v5 playback ported from N3urda/hongguoTV, commits 18c37c2 and
 // 216fd3e. Its GPL signing implementation derives from drpys 22261ad.
+// Bodyless video_tab profile follows jackotom/hongguo-drama 92df757 (GPL-3.0).
 // Constants describe the wire protocol; no captured user identity is included.
 package hongguo
 
@@ -49,10 +50,32 @@ func signedMobileRequest(ctx context.Context, payload []byte, dev *device, now t
 		return nil, err
 	}
 	body := compressed.Bytes()
+	return signedMobileAPIRequest(ctx, http.MethodPost, mobileVideoAPI, nil, body, dev, now)
+}
+
+func signedMobileTabRequest(ctx context.Context, vid string, dev *device, now time.Time) (*http.Request, error) {
+	params := url.Values{
+		"video_id": {vid}, "video_id_type": {"0"}, "device_level": {"1"},
+		"need_all_video_definition": {"1"}, "need_mp4_align": {"0"}, "use_os_player": {"0"},
+		"video_platform": {"1024"}, "source": {"0"}, "from_video_id": {""},
+	}
+	// V5 GET signs MD5(empty), whereas the older SDK profile signs zeroes.
+	// Keep this non-nil even though no request body or body headers are sent.
+	req, err := signedMobileAPIRequest(ctx, http.MethodGet, tabVideoAPI, params, []byte{}, dev, now)
+	if err == nil {
+		req.Header.Set("User-Agent", strings.Replace(videoUA, "71332", "73932", 1))
+	}
+	return req, err
+}
+
+func signedMobileAPIRequest(ctx context.Context, method, api string, params url.Values, body []byte, dev *device, now time.Time) (*http.Request, error) {
 	q := url.Values{"aid": {"8662"}, "app_name": {"novelread"}, "version_code": {"74332"},
 		"version_name": {"7.4.3.32"}, "channel": {"vivo_8662_64"}, "device_platform": {"android"},
 		"device_type": {"PGT-AN10"}, "os_version": {"12"}, "update_version_code": {"74332"},
 		"iid": {dev.IID}, "cdid": {dev.CDID}, "device_id": {dev.DeviceID}}
+	for k, values := range params {
+		q[k] = append([]string(nil), values...)
+	}
 	ts := uint32(now.Unix())
 	bh := md5.Sum(body)
 	for n := 0; n < 1024; n++ {
@@ -65,19 +88,23 @@ func signedMobileRequest(ctx context.Context, payload []byte, dev *device, now t
 		if signingIV(signingIV(signingIV(0x20230928, qh), bh[:]), le32(ts))&15 != 12 {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, mobileVideoAPI+"?"+query, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, method, api+"?"+query, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		for k, v := range map[string]string{
 			"User-Agent": "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)",
-			"Accept":     "application/json", "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip",
-			"x-ss-stub": strings.ToUpper(hex.EncodeToString(bh[:])),
-			"x-khronos": strconv.FormatUint(uint64(ts), 10),
-			"x-helios":  heliosWithLicense(ts, random32(), mobileLicense),
-			"x-medusa":  buildMobileMedusa(query, body, ts, dev, signingNonce, signingStarted, random32),
+			"Accept":     "application/json",
+			"x-khronos":  strconv.FormatUint(uint64(ts), 10),
+			"x-helios":   heliosWithLicense(ts, random32(), mobileLicense),
+			"x-medusa":   buildMobileMedusa(query, body, ts, dev, signingNonce, signingStarted, random32),
 		} {
 			req.Header.Set(k, v)
+		}
+		if method == http.MethodPost {
+			req.Header.Set("Content-Type", "application/json; charset=utf-8")
+			req.Header.Set("Content-Encoding", "gzip")
+			req.Header.Set("x-ss-stub", strings.ToUpper(hex.EncodeToString(bh[:])))
 		}
 		return req, nil
 	}
