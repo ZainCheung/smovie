@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/bits"
 	"net/http"
 	"net/url"
@@ -410,6 +411,8 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 	if !vidPattern.MatchString(vid) {
 		return nil, errors.New("分集编号无效")
 	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	model, err := loadVideoModel(ctx, vid)
 	if err != nil {
 		return nil, fmt.Errorf("取源失败：%w", err)
@@ -418,26 +421,15 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 	inline := len(rows) > 0
 	info := *model
 	ua := playbackUA
-	if !inline {
-		fallback := parseFallback(model.FallbackAPI)
-		if fallback == "" {
-			return nil, errors.New("接口未返回本集片源地址")
+	if !inline || !hasCompatibleVideo(rows) {
+		if inline && parseFallback(model.FallbackAPI) == "" {
+			return nil, errors.New("本集暂未提供兼容的 H.264/HEVC 片源")
 		}
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fallback, nil)
-		req.Header.Set("User-Agent", videoUA)
-		fb, err := doJSON(req)
+		fallback, err := loadFallbackVideoInfo(ctx, model, inline)
 		if err != nil {
-			return nil, fmt.Errorf("取源失败：%w", err)
+			return nil, err
 		}
-		var outer struct {
-			VideoInfo struct {
-				Data videoInfo `json:"data"`
-			} `json:"video_info"`
-		}
-		if err := json.Unmarshal(fb, &outer); err != nil {
-			return nil, errors.New("片源数据无法解析")
-		}
-		info = outer.VideoInfo.Data
+		info = *fallback
 		rows = info.rows()
 		ua = videoUA
 	}
@@ -450,14 +442,7 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 	}
 	var cands []cand
 	for _, it := range rows {
-		codec := strings.ToLower(firstNonEmpty(it.CodecType, it.VideoMeta.CodecType))
-		rank := 2
-		switch codec {
-		case "h264", "avc", "avc1":
-			rank = 0
-		case "hevc", "h265", "hvc1", "hev1", "bytevc1":
-			rank = 1
-		}
+		codec, rank := compatibleVideoCodec(it)
 		if rank == 2 {
 			continue
 		}
@@ -599,9 +584,123 @@ func (it videoItem) size() (int, int) {
 }
 
 type videoInfo struct {
+	VideoID     string          `json:"video_id"`
+	Duration    flexFloat       `json:"video_duration"`
 	VideoList   json.RawMessage `json:"video_list"`
 	FallbackAPI json.RawMessage `json:"fallback_api"`
 	KeySeed     string          `json:"key_seed"`
+}
+
+func compatibleVideoCodec(it videoItem) (string, int) {
+	codec := strings.ToLower(firstNonEmpty(it.CodecType, it.VideoMeta.CodecType))
+	switch codec {
+	case "h264", "avc", "avc1":
+		return codec, 0
+	case "hevc", "h265", "hvc1", "hev1", "bytevc1":
+		return codec, 1
+	default:
+		return codec, 2
+	}
+}
+
+func hasCompatibleVideo(rows []videoItem) bool {
+	for _, it := range rows {
+		if _, rank := compatibleVideoCodec(it); rank < 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func validVideoIdentity(v *videoInfo) bool {
+	duration := float64(v.Duration)
+	return strings.TrimSpace(v.VideoID) != "" && duration > 0 && !math.IsNaN(duration) && !math.IsInf(duration, 0)
+}
+
+// The model's video-info URL can negotiate HEVC even when all inline rows are
+// ByteVC2. Preserve the resource and authorization, changing only codec_type.
+// A negotiated model must identify the same content and full duration.
+func loadFallbackVideoInfo(ctx context.Context, model *videoInfo, negotiate bool) (*videoInfo, error) {
+	raw := parseFallback(model.FallbackAPI)
+	if raw == "" {
+		return nil, errors.New("接口未返回本集片源地址")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !trustedVideoInfoURL(u) {
+		return nil, errors.New("片源返回了不受支持的视频信息地址")
+	}
+	if negotiate {
+		if !validVideoIdentity(model) {
+			return nil, errors.New("无法确认本集片源编号和完整时长")
+		}
+		q := u.Query()
+		q.Set("codec_type", "1")
+		u.RawQuery = q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, errors.New("视频信息地址格式无效")
+	}
+	req.Header.Set("User-Agent", videoUA)
+	client := *httpClient
+	previousRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !trustedVideoInfoURL(req.URL) {
+			return errors.New("视频信息重定向地址不受支持")
+		}
+		if len(via) >= 10 {
+			return errors.New("视频信息重定向次数过多")
+		}
+		if previousRedirect != nil {
+			return previousRedirect(req, via)
+		}
+		return nil
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		// The video-info URL includes authorization parameters. Preserve the
+		// cause without copying that URL into the player's error message.
+		var requestError *url.Error
+		if errors.As(err, &requestError) {
+			err = requestError.Err
+		}
+		return nil, fmt.Errorf("取源失败：%w", err)
+	}
+	body, err := readJSONResponse(res)
+	if err != nil {
+		return nil, fmt.Errorf("取源失败：%w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var outer struct {
+		Code      json.Number `json:"code"`
+		VideoInfo struct {
+			Code json.Number `json:"code"`
+			Data videoInfo   `json:"data"`
+		} `json:"video_info"`
+	}
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return nil, errors.New("片源数据无法解析")
+	}
+	for _, code := range []json.Number{outer.Code, outer.VideoInfo.Code} {
+		if c := code.String(); c != "" && c != "0" {
+			return nil, errors.New("接口暂未提供本集播放信息")
+		}
+	}
+	info := &outer.VideoInfo.Data
+	if negotiate && (!validVideoIdentity(info) || info.VideoID != model.VideoID || math.Abs(float64(info.Duration-model.Duration)) > 0.5) {
+		return nil, errors.New("备用片源编号或完整时长与本集不符")
+	}
+	return info, nil
+}
+
+func trustedVideoInfoURL(u *url.URL) bool {
+	if u == nil || u.Scheme != "https" || u.User != nil || (u.Port() != "" && u.Port() != "443") || u.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "snssdk.com" || strings.HasSuffix(host, ".snssdk.com")
 }
 
 // rows reads video_list, an object keyed by rendition or an array.
