@@ -307,7 +307,7 @@ func TestResolvePlayModelShapes(t *testing.T) {
 		{"1004 object", `{"code":0,"data":{"1004":{"123":{"video_model":` + model + `}}}}`, false, 1},
 		{"1004 string", `{"code":0,"data":{"1004":{"123":{"video_model":` + string(encoded) + `}}}}`, false, 1},
 		{"video_model_data", `{"code":0,"data":{"video_model_data":{"123":{"video_model":` + model + `}}}}`, false, 1},
-		{"empty", ``, true, 4}, {"business error", `{"code":100103}`, true, 1},
+		{"empty", ``, true, 5}, {"business error", `{"code":100103}`, true, 1},
 		{"invalid JSON", `invalid`, true, 1}, {"invalid 1004", `{"data":{"1004":[]}}`, true, 1},
 		{"other episode", `{"code":0,"data":{"1004":{"456":{"video_model":` + model + `}}}}`, true, 1},
 		{"invalid model", `{"data":{"123":{"video_model":"invalid"}}}`, true, 1},
@@ -410,7 +410,7 @@ func TestSignedJSONRetryBoundaries(t *testing.T) {
 		wantCalls    int
 		wantErr      error
 	}{
-		{name: "empty", status: 200, wantCalls: 4, wantErr: errEmpty},
+		{name: "empty", status: 200, wantCalls: 5, wantErr: errEmpty},
 		{name: "cancel during retry", status: 200, cancel: true, wantCalls: 1, wantErr: context.Canceled},
 		{name: "rate limited", status: 429, wantCalls: 1},
 		{name: "server error", status: 503, wantCalls: 1},
@@ -1026,7 +1026,7 @@ func TestV5VideoTabRecoveryBoundaries(t *testing.T) {
 		cancel                   bool
 		wantCalls, wantRegisters int
 	}{
-		{name: "both routes empty", status: 200, wantCalls: 4, wantRegisters: 2},
+		{name: "both routes empty", status: 200, wantCalls: 5, wantRegisters: 2},
 		{name: "forbidden", status: 403, wantCalls: 2, wantRegisters: 1},
 		{name: "rate limited", status: 429, wantCalls: 2, wantRegisters: 1},
 		{name: "server error", status: 503, wantCalls: 2, wantRegisters: 1},

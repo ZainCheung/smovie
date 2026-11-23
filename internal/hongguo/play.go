@@ -55,6 +55,7 @@ var deviceQuery = map[string]string{
 type device struct {
 	DeviceID, IID, CDID string
 	Cookie              string // anonymous registration cookies, kept in memory only
+	fullPlayback        bool   // successful full V5 wire profile; protected by playbackGate
 }
 
 var (
@@ -201,7 +202,7 @@ func registerDevice(ctx context.Context) (*device, error) {
 	var cookies []string
 	for _, cookie := range res.Cookies() {
 		switch cookie.Name {
-		case "install_id", "ttreq", "store-region", "store-region-src":
+		case "install_id", "odin_tt", "ttreq", "store-region", "store-region-src":
 			cookies = append(cookies, (&http.Cookie{Name: cookie.Name, Value: cookie.Value}).String())
 		}
 	}
@@ -256,7 +257,8 @@ func readJSONResponse(res *http.Response) ([]byte, error) {
 // signedJSON reuses the playback identity under a cancellable gate. Other
 // SDK profiles keep fresh identities, isolated from playback. An empty response
 // from the mobile POST first tries v5 video_tab with the same identity. If both
-// are empty, renew at most once. Explicit HTTP rejections never rotate identities.
+// are empty, renew at most once, then try the full V5 wire context once. A
+// successful profile stays with its device. HTTP rejections never rotate it.
 func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -300,13 +302,25 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 			playbackDevice = dev
 		}
 	}
+	fullProfile := tabVID != "" && dev.fullPlayback
 	for attempt := 0; ; attempt++ {
-		req, err := signedRequest(ctx, api, payload, dev, time.Now())
+		var req *http.Request
+		var err error
+		if fullProfile {
+			req, err = signedFullMobileRequest(ctx, payload, dev, time.Now())
+		} else {
+			req, err = signedRequest(ctx, api, payload, dev, time.Now())
+		}
 		if err != nil {
 			return nil, err
 		}
-		body, err := doJSON(req)
-		if errors.Is(err, errEmpty) && tabVID != "" {
+		var body []byte
+		if fullProfile {
+			body, err = fullMobileJSON(req)
+		} else {
+			body, err = doJSON(req)
+		}
+		if errors.Is(err, errEmpty) && tabVID != "" && !fullProfile {
 			// The model route may be unavailable while the registered identity
 			// still works on video_tab. Keep the deadline and exact episode.
 			if req, err = signedMobileTabRequest(ctx, tabVID, dev, time.Now()); err == nil {
@@ -314,10 +328,22 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 			}
 		}
 		if err == nil {
+			dev.fullPlayback = fullProfile
 			return body, nil
 		}
 		if playback && errors.Is(err, errEmpty) {
 			playbackDevice = nil
+		}
+		if tabVID != "" && !fullProfile && errors.Is(err, errEmpty) && attempt == 1 {
+			req, err = signedFullMobileRequest(ctx, payload, dev, time.Now())
+			if err == nil {
+				body, err = fullMobileJSON(req)
+			}
+			if err == nil {
+				dev.fullPlayback = true
+				playbackDevice = dev
+			}
+			return body, err
 		}
 		if !errors.Is(err, errEmpty) || attempt == 1 {
 			return nil, err
