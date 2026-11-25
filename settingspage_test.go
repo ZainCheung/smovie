@@ -51,3 +51,20 @@ func TestPanelFullScreenSetting(t *testing.T) {
 		t.Fatal("not saved")
 	}
 }
+
+func TestProtocolAndSignerSettingsUI(t *testing.T) {
+	configOverride = t.TempDir()
+	a := newApp()
+	a.images = newImageCache(func() {})
+	a.server = &mediaServer{}
+	a.server.hostFS.Store(a.hostFullScreen())
+	tt := ui.NewTester(func(c *ui.Context) {
+		c.SetTheme(a.theme)
+		ui.Scroll(c).Fill().Children(func() { a.settingsPage(c) })
+		a.syncSettings()
+	}, 1280, 1800)
+	tt.Frame()
+	if !tt.HasText("取源与协议") || !tt.HasText("取源协议策略") || !tt.HasText("远程签名服务（可选）") {
+		t.Fatalf("protocol settings section missing from %v", tt.Texts())
+	}
+}

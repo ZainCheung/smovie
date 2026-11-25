@@ -56,6 +56,7 @@ type device struct {
 	DeviceID, IID, CDID string
 	Cookie              string // anonymous registration cookies, kept in memory only
 	fullPlayback        bool   // successful full V5 wire profile; protected by playbackGate
+	singleVideoModel    bool   // successful single video_model/v1 V5+551 profile; protected by playbackGate
 }
 
 var (
@@ -117,19 +118,21 @@ func randomHex(n int) string {
 }
 
 func registerDevice(ctx context.Context) (*device, error) {
+	prof := activeProfile().raw.Playback
+	reg := prof.Register
 	now := time.Now().UnixMilli()
 	cdid := randomUUID()
 	header := map[string]any{
-		"display_name": "红果免费短剧", "update_version_code": 73932, "manifest_version_code": 73932,
-		"app_version_minor": "7.3.9.32", "aid": 8662, "channel": "update_64", "package": "com.phoenix.read",
-		"app_version": "7.3.9.32", "version_code": 73932, "sdk_version": "3.7.0-rc.34-fanqie-xiaoshuo",
+		"display_name": "红果免费短剧", "update_version_code": reg.VersionCode, "manifest_version_code": reg.VersionCode,
+		"app_version_minor": reg.AppVersion, "aid": 8662, "channel": "update_64", "package": "com.phoenix.read",
+		"app_version": reg.AppVersion, "version_code": reg.VersionCode, "sdk_version": reg.SDKVersion,
 		"sdk_target_version": 29, "git_hash": "3a88f4e", "os": "Android", "os_version": "16", "os_api": 36,
-		"device_model": "25053RT47C", "device_brand": "Redmi", "device_manufacturer": "Redmi",
+		"device_model": reg.DeviceModel, "device_brand": reg.DeviceBrand, "device_manufacturer": reg.DeviceBrand,
 		"cpu_abi": "arm64-v8a", "release_build": "b5e187f", "density_dpi": 520, "display_density": "mdpi",
 		"resolution": "1280x2772", "language": "zh", "timezone": 8, "access": "wifi", "not_request_sender": 0,
 		"carrier": "CHINA MOBILE", "mcc_mnc": "46000", "rom": "eng.root.20231116.160340",
 		"rom_version": "W528JS release-keys", "cdid": cdid,
-		"sig_hash": "56a962410c494bbaf0b58dba20cae56f", "openudid": randomHex(8),
+		"sig_hash": reg.SigHash, "openudid": randomHex(8),
 		"clientudid": randomUUID(), "ipv6_list": []any{}, "region": "CN", "tz_name": "Asia/Shanghai",
 		"tz_offset": 28800, "sim_region": "cn", "sim_serial_number": []any{}, "oaid_may_support": false,
 		"req_id": randomUUID(), "device_platform": "android",
@@ -156,9 +159,9 @@ func registerDevice(ctx context.Context) (*device, error) {
 	data := append(append(prefix, random...), enc...)
 
 	stub := md5.Sum(data)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, registerURL, bytes.NewReader(data))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, prof.RegisterURL, bytes.NewReader(data))
 	for k, v := range map[string]string{
-		"User-Agent": registerUA, "Accept": "application/json", "Content-Type": "application/octet-stream;tt-data=a",
+		"User-Agent": prof.RegisterUA, "Accept": "application/json", "Content-Type": "application/octet-stream;tt-data=a",
 		"log-encode-type": "gzip", "x-ss-dp": "8662", "x-ss-req-ticket": strconv.FormatInt(now, 10),
 		"x-vc-bdturing-sdk-version": "4.0.3.cn", "lc": "101", "sdk-version": "2",
 		"passport-sdk-version": "5051452", "x-neptune": "-8|50:51:59:30:40:47:49:39",
@@ -262,7 +265,8 @@ func readJSONResponse(res *http.Response) ([]byte, error) {
 func signedJSON(ctx context.Context, api string, payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	playback := api == mobileVideoAPI || api == videoAPI || api == "https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/v1/"
+	pb := activeProfile().raw.Playback
+	playback := api == mobileVideoAPI || api == pb.MobileVideoAPI || api == videoAPI || api == "https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/v1/" || api == "https://"+pb.FallbackHost+"/novel/player/multi_video_model/v1/"
 	if playback {
 		select {
 		case playbackGate <- struct{}{}:
@@ -279,8 +283,10 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	prof := activeProfile()
+	pb := prof.raw.Playback
 	var tabVID string
-	if api == mobileVideoAPI {
+	if api == mobileVideoAPI || api == pb.MobileVideoAPI {
 		var modelRequest struct {
 			Mixed map[string][]string `json:"mixed_video_id_map"`
 		}
@@ -302,7 +308,27 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 			playbackDevice = dev
 		}
 	}
-	fullProfile := tabVID != "" && dev.fullPlayback
+	preferSingle := tabVID != "" && len(pb.RouteOrder) > 0 && pb.RouteOrder[0] == "video_model_v5"
+	allowSingle := tabVID != "" && prof.hasRoute("video_model_v5")
+	if allowSingle && (preferSingle || dev.singleVideoModel) {
+		req, err := signedSingleVideoModelRequest(ctx, tabVID, dev, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		body, err := fullMobileJSON(req)
+		if err == nil {
+			dev.singleVideoModel = true
+			return body, nil
+		}
+		if !errors.Is(err, errEmpty) {
+			return nil, err
+		}
+		dev.singleVideoModel = false
+	}
+	preferFull := tabVID != "" && len(pb.RouteOrder) > 0 && pb.RouteOrder[0] == "v5_full"
+	fullProfile := tabVID != "" && (dev.fullPlayback || preferFull)
+	allowTab := prof.hasRoute("v5_tab")
+	allowFull := prof.hasRoute("v5_full")
 	for attempt := 0; ; attempt++ {
 		var req *http.Request
 		var err error
@@ -320,7 +346,7 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 		} else {
 			body, err = doJSON(req)
 		}
-		if errors.Is(err, errEmpty) && tabVID != "" && !fullProfile {
+		if errors.Is(err, errEmpty) && tabVID != "" && !fullProfile && allowTab {
 			// The model route may be unavailable while the registered identity
 			// still works on video_tab. Keep the deadline and exact episode.
 			if req, err = signedMobileTabRequest(ctx, tabVID, dev, time.Now()); err == nil {
@@ -334,7 +360,7 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 		if playback && errors.Is(err, errEmpty) {
 			playbackDevice = nil
 		}
-		if tabVID != "" && !fullProfile && errors.Is(err, errEmpty) && attempt == 1 {
+		if tabVID != "" && !fullProfile && allowFull && errors.Is(err, errEmpty) && attempt == 1 {
 			req, err = signedFullMobileRequest(ctx, payload, dev, time.Now())
 			if err == nil {
 				body, err = fullMobileJSON(req)
@@ -342,10 +368,29 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 			if err == nil {
 				dev.fullPlayback = true
 				playbackDevice = dev
+				return body, nil
+			}
+			if errors.Is(err, errEmpty) && allowSingle && !preferSingle {
+				if sreq, serr := signedSingleVideoModelRequest(ctx, tabVID, dev, time.Now()); serr == nil {
+					if sbody, sdoErr := fullMobileJSON(sreq); sdoErr == nil {
+						dev.singleVideoModel = true
+						playbackDevice = dev
+						return sbody, nil
+					}
+				}
 			}
 			return body, err
 		}
 		if !errors.Is(err, errEmpty) || attempt == 1 {
+			if errors.Is(err, errEmpty) && allowSingle && !preferSingle {
+				if sreq, serr := signedSingleVideoModelRequest(ctx, tabVID, dev, time.Now()); serr == nil {
+					if sbody, sdoErr := fullMobileJSON(sreq); sdoErr == nil {
+						dev.singleVideoModel = true
+						playbackDevice = dev
+						return sbody, nil
+					}
+				}
+			}
 			return nil, err
 		}
 		timer := time.NewTimer(300 * time.Millisecond)
@@ -361,13 +406,14 @@ func signedJSONWithDevice(ctx context.Context, api string, payload []byte, playb
 		if playback {
 			playbackDevice = dev
 		}
-		api = strings.Replace(api, appAPIBase+"/", "https://api5-normal-hl.fqnovel.com/", 1)
+		api = strings.Replace(api, pb.AppAPIBase+"/", "https://"+pb.FallbackHost+"/", 1)
+		api = strings.Replace(api, appAPIBase+"/", "https://"+pb.FallbackHost+"/", 1)
 	}
 }
 
 // loadVideoModel uses v5 player signing for both POST and video_tab recovery.
 func loadVideoModel(ctx context.Context, vid string) (*videoInfo, error) {
-	body, err := signedJSON(ctx, mobileVideoAPI, mobileVideoPayload(vid))
+	body, err := signedJSON(ctx, activeProfile().raw.Playback.MobileVideoAPI, mobileVideoPayload(vid))
 	if err != nil {
 		return nil, err
 	}
@@ -395,13 +441,18 @@ func parseVideoModel(body []byte, vid string) (*videoInfo, error) {
 			return nil, errors.New("播放接口返回无效数据")
 		}
 	}
-	var entry struct {
-		VideoModel json.RawMessage `json:"video_model"`
+	var modelJSON []byte
+	if flat, ok := res.Data["video_model"]; ok && len(bytes.TrimSpace(flat)) > 0 {
+		modelJSON = flat
+	} else {
+		var entry struct {
+			VideoModel json.RawMessage `json:"video_model"`
+		}
+		if err := json.Unmarshal(res.Data[vid], &entry); err != nil || len(entry.VideoModel) == 0 {
+			return nil, errors.New("接口未返回本集片源")
+		}
+		modelJSON = []byte(entry.VideoModel)
 	}
-	if err := json.Unmarshal(res.Data[vid], &entry); err != nil || len(entry.VideoModel) == 0 {
-		return nil, errors.New("接口未返回本集片源")
-	}
-	modelJSON := []byte(entry.VideoModel)
 	var s string
 	if json.Unmarshal(modelJSON, &s) == nil {
 		modelJSON = []byte(s)
@@ -419,6 +470,9 @@ type PlayInfo struct {
 	URL string
 	// BackupURLs belong to the same rendition and use the same content key.
 	BackupURLs []string
+	// AudioURL is populated for segmented DASH full-length titles with a
+	// separate audio track; empty for normal single-file episodes.
+	AudioURL   string
 	ContentKey string // hex AES-128 key for CENC, empty when not encrypted
 	Codec      string
 	Quality    string
@@ -439,16 +493,29 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	prof := activeProfile()
+	pb := prof.raw.Playback
+	ohgFirst := len(pb.RouteOrder) > 0 && pb.RouteOrder[0] == "openhongguo" && isOpenhongguoBackupEnabled()
+	if ohgFirst {
+		if info, err := resolvePlayViaOpenhongguo(ctx, vid, maxPx); err == nil {
+			return info, nil
+		}
+	}
 	model, err := loadVideoModel(ctx, vid)
 	if err != nil {
+		if !ohgFirst && errors.Is(err, errEmpty) && ctx.Err() == nil && prof.hasRoute("openhongguo") && isOpenhongguoBackupEnabled() {
+			if backup, backupErr := resolvePlayViaOpenhongguo(ctx, vid, maxPx); backupErr == nil {
+				return backup, nil
+			}
+		}
 		return nil, fmt.Errorf("取源失败：%w", err)
 	}
 	rows := model.rows()
 	inline := len(rows) > 0
 	info := *model
-	ua := playbackUA
+	ua := pb.PlaybackUA
 	if !inline || !hasCompatibleVideo(rows) {
-		if inline && parseFallback(model.FallbackAPI) == "" {
+		if inline && (!prof.codecNegOn || parseFallback(model.FallbackAPI) == "") {
 			return nil, errors.New("本集暂未提供兼容的 H.264/HEVC 片源")
 		}
 		fallback, err := loadFallbackVideoInfo(ctx, model, inline)
@@ -457,7 +524,7 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 		}
 		info = *fallback
 		rows = info.rows()
-		ua = videoUA
+		ua = pb.VideoUA
 	}
 	type cand struct {
 		item   videoItem
@@ -512,6 +579,7 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 		}
 		cands = fit
 	}
+	audioURL := info.resolveAudioURL()
 	var lastErr error
 	for _, c := range cands {
 		spade := firstNonEmpty(c.item.SpadeA, c.item.EncryptInfo.SpadeA)
@@ -565,7 +633,7 @@ func ResolvePlay(ctx context.Context, vid string, maxPx int) (*PlayInfo, error) 
 		if c.pixels > 0 {
 			quality = strconv.Itoa(c.pixels) + "P"
 		}
-		return &PlayInfo{VID: vid, URL: urls[0], BackupURLs: urls[1:], ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h, Qualities: qualities}, nil
+		return &PlayInfo{VID: vid, URL: urls[0], BackupURLs: urls[1:], AudioURL: audioURL, ContentKey: key, Codec: codec, Quality: quality, UserAgent: ua, Width: c.w, Height: c.h, Qualities: qualities}, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("本集片源地址无法解析")
@@ -613,6 +681,7 @@ type videoInfo struct {
 	VideoID     string          `json:"video_id"`
 	Duration    flexFloat       `json:"video_duration"`
 	VideoList   json.RawMessage `json:"video_list"`
+	Dynamic     json.RawMessage `json:"dynamic_video"`
 	FallbackAPI json.RawMessage `json:"fallback_api"`
 	KeySeed     string          `json:"key_seed"`
 }
@@ -647,6 +716,7 @@ func validVideoIdentity(v *videoInfo) bool {
 // ByteVC2. Preserve the resource and authorization, changing only codec_type.
 // A negotiated model must identify the same content and full duration.
 func loadFallbackVideoInfo(ctx context.Context, model *videoInfo, negotiate bool) (*videoInfo, error) {
+	pb := activeProfile().raw.Playback
 	raw := parseFallback(model.FallbackAPI)
 	if raw == "" {
 		return nil, errors.New("接口未返回本集片源地址")
@@ -660,14 +730,14 @@ func loadFallbackVideoInfo(ctx context.Context, model *videoInfo, negotiate bool
 			return nil, errors.New("无法确认本集片源编号和完整时长")
 		}
 		q := u.Query()
-		q.Set("codec_type", "1")
+		q.Set("codec_type", firstNonEmpty(pb.CodecNegotiation.TargetCodecType, "1"))
 		u.RawQuery = q.Encode()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, errors.New("视频信息地址格式无效")
 	}
-	req.Header.Set("User-Agent", videoUA)
+	req.Header.Set("User-Agent", pb.VideoUA)
 	client := *httpClient
 	previousRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -726,17 +796,21 @@ func trustedVideoInfoURL(u *url.URL) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return host == "snssdk.com" || strings.HasSuffix(host, ".snssdk.com")
+	if !hostMatchesAny(host, trustedVideoInfoSuffixes) {
+		return false
+	}
+	return hostMatchesAny(host, activeProfile().raw.Playback.AllowedVideoInfoDomains)
 }
 
-// rows reads video_list, an object keyed by rendition or an array.
+// rows reads video_list (an object keyed by rendition or an array) and falls
+// back to dynamic_video.dynamic_video_list for segmented DASH titles.
 func (v videoInfo) rows() []videoItem {
 	var arr []videoItem
-	if json.Unmarshal(v.VideoList, &arr) == nil {
+	if json.Unmarshal(v.VideoList, &arr) == nil && len(arr) > 0 {
 		return arr
 	}
 	var obj map[string]videoItem
-	if json.Unmarshal(v.VideoList, &obj) == nil {
+	if json.Unmarshal(v.VideoList, &obj) == nil && len(obj) > 0 {
 		keys := make([]string, 0, len(obj))
 		for k := range obj {
 			keys = append(keys, k)
@@ -745,8 +819,48 @@ func (v videoInfo) rows() []videoItem {
 		for _, k := range keys {
 			arr = append(arr, obj[k])
 		}
+		return arr
+	}
+	if raw := bytes.TrimSpace(v.Dynamic); len(raw) > 0 && string(raw) != "null" {
+		var dyn struct {
+			VideoList []videoItem `json:"dynamic_video_list"`
+		}
+		if json.Unmarshal(raw, &dyn) == nil && len(dyn.VideoList) > 0 {
+			return dyn.VideoList
+		}
 	}
 	return arr
+}
+
+func (v videoInfo) resolveAudioURL() string {
+	raw := bytes.TrimSpace(v.Dynamic)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var dyn struct {
+		AudioList []videoItem `json:"dynamic_audio_list"`
+	}
+	if json.Unmarshal(raw, &dyn) != nil || len(dyn.AudioList) == 0 {
+		return ""
+	}
+	rawURL := dyn.AudioList[0].MainURL
+	if rawURL == "" {
+		return ""
+	}
+	audio := cleanURL(rawURL)
+	if v.KeySeed != "" {
+		seed, err := base64.StdEncoding.DecodeString(v.KeySeed)
+		if err != nil {
+			return ""
+		}
+		if audio, err = decryptSpadeURL(rawURL, seed); err != nil {
+			return ""
+		}
+	}
+	if checkMediaURL(audio) != nil {
+		return ""
+	}
+	return audio
 }
 
 func parseFallback(raw json.RawMessage) string {
@@ -786,10 +900,8 @@ func checkMediaURL(raw string) error {
 		return errors.New("片源地址格式无效")
 	}
 	host := u.Hostname()
-	for _, d := range []string{"qznovelvod.com", "fqnovelvod.com", "douyinvod.com"} {
-		if host == d || strings.HasSuffix(host, "."+d) {
-			return nil
-		}
+	if hostMatchesAny(host, trustedMediaSuffixes) && hostMatchesAny(host, activeProfile().raw.Playback.AllowedMediaDomains) {
+		return nil
 	}
 	return errors.New("片源返回了不受支持的服务地址")
 }

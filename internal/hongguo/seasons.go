@@ -215,10 +215,20 @@ func Seasons(ctx context.Context, s Series, albumID string) ([]Season, error) {
 }
 
 // SeasonsProgress is Seasons, telling progress the seasons found so far,
-// in order, each time it finds more.
+// in order, each time it finds more. It first asks the official App album API
+// (via openhongguo's GetAlbum) for all seasons in a single request, and falls
+// back to website + search discovery when the album API is unavailable.
 func SeasonsProgress(ctx context.Context, s Series, albumID string, progress func([]Season)) ([]Season, error) {
 	if !seriesIDPattern.MatchString(albumID) {
 		return nil, errors.New("合集编号无效")
+	}
+	if isOpenhongguoBackupEnabled() {
+		if direct, err := seasonsViaOpenhongguo(ctx, s, albumID); err == nil && len(direct) > 0 {
+			if progress != nil {
+				progress(direct)
+			}
+			return direct, nil
+		}
 	}
 	base := seasonBase(s.Title)
 	if base == "" {

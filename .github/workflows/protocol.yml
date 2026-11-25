@@ -1,0 +1,56 @@
+name: Publish Protocol Profile
+
+# Validates, signs, and publishes internal/hongguo/profile_default.json to the
+# `protocol-latest` GitHub Release so installed clients can hot-update protocol
+# parameters without waiting for a full cross-platform binary release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/hongguo/profile_default.json"
+  workflow_dispatch:
+    inputs:
+      skip_live:
+        description: "Skip live contract check before publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Run unit tests and profile validation
+        run: CGO_ENABLED=0 go test -count=1 ./internal/hongguo/...
+      - name: Run live contract check
+        if: ${{ inputs.skip_live != true }}
+        env:
+          SMOVIE_LIVE: "1"
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          CGO_ENABLED=0 go test -count=1 -run TestLiveContract -v ./internal/hongguo
+      - name: Sign protocol profile
+        env:
+          PROTOCOL_SIGNING_PRIVATE_KEY: ${{ secrets.PROTOCOL_SIGNING_PRIVATE_KEY || secrets.MYGO_UPDATER_PRIVATE_KEY }}
+        run: |
+          cp internal/hongguo/profile_default.json protocol-profile.json
+          go run ./cmd/sign-profile -sign -in protocol-profile.json -out protocol-profile.json.sig
+          go run ./cmd/sign-profile -verify -in protocol-profile.json -sig protocol-profile.json.sig
+      - name: Upload to protocol-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view protocol-latest > /dev/null 2>&1; then
+            gh release create protocol-latest --latest=false --title "Protocol Policy (Latest)" \
+              --notes "Signed declarative protocol hotfix bundles for smovie clients."
+          else
+            gh release edit protocol-latest --latest=false
+          fi
+          gh release upload protocol-latest --clobber protocol-profile.json protocol-profile.json.sig

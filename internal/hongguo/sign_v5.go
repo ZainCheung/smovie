@@ -28,8 +28,9 @@ var mobileMagic = unhex("2d4b4fca49750d433fb5ae2c226dcc56")
 var mobileSignKey = unhex("b23c2a470a20d105dc3f8c4438f8272ed46d6c89ffdcdedd5108698d26e9489d")
 
 func mobileVideoPayload(vid string) []byte {
+	pb := activeProfile().raw.Playback
 	body, _ := json.Marshal(map[string]any{
-		"biz_param": map[string]any{"detail_page_version": 0, "device_level": 1,
+		"biz_param": map[string]any{"detail_page_version": 0, "device_level": pb.MobileDeviceLevel,
 			"disable_digg_stat": false, "disable_video_relate_book": false,
 			"need_all_video_definition": true, "need_mp4_align": false,
 			"use_os_player": false, "use_server_dns": false, "video_platform": 1024},
@@ -50,28 +51,32 @@ func signedMobileRequest(ctx context.Context, payload []byte, dev *device, now t
 		return nil, err
 	}
 	body := compressed.Bytes()
-	return signedMobileAPIRequest(ctx, http.MethodPost, mobileVideoAPI, nil, body, dev, now)
+	return signedMobileAPIRequest(ctx, http.MethodPost, activeProfile().raw.Playback.MobileVideoAPI, nil, body, dev, now)
 }
 
 func signedMobileTabRequest(ctx context.Context, vid string, dev *device, now time.Time) (*http.Request, error) {
+	pb := activeProfile().raw.Playback
 	params := url.Values{
-		"video_id": {vid}, "video_id_type": {"0"}, "device_level": {"1"},
+		"video_id": {vid}, "video_id_type": {"0"}, "device_level": {strconv.Itoa(pb.MobileDeviceLevel)},
 		"need_all_video_definition": {"1"}, "need_mp4_align": {"0"}, "use_os_player": {"0"},
 		"video_platform": {"1024"}, "source": {"0"}, "from_video_id": {""},
 	}
 	// V5 GET signs MD5(empty), whereas the older SDK profile signs zeroes.
 	// Keep this non-nil even though no request body or body headers are sent.
-	req, err := signedMobileAPIRequest(ctx, http.MethodGet, tabVideoAPI, params, []byte{}, dev, now)
+	req, err := signedMobileAPIRequest(ctx, http.MethodGet, pb.TabVideoAPI, params, []byte{}, dev, now)
 	if err == nil {
-		req.Header.Set("User-Agent", strings.Replace(videoUA, "71332", "73932", 1))
+		req.Header.Set("User-Agent", strings.Replace(pb.VideoUA, "71332", "73932", 1))
 	}
 	return req, err
 }
 
 func signedMobileAPIRequest(ctx context.Context, method, api string, params url.Values, body []byte, dev *device, now time.Time) (*http.Request, error) {
-	q := url.Values{"aid": {"8662"}, "app_name": {"novelread"}, "version_code": {"74332"},
-		"version_name": {"7.4.3.32"}, "channel": {"vivo_8662_64"}, "device_platform": {"android"},
-		"device_type": {"PGT-AN10"}, "os_version": {"12"}, "update_version_code": {"74332"},
+	prof := activeProfile()
+	pb := prof.raw.Playback
+	m5 := pb.MedusaV5
+	q := url.Values{"aid": {"8662"}, "app_name": {"novelread"}, "version_code": {pb.MobileVersionCode},
+		"version_name": {pb.MobileVersionName}, "channel": {pb.MobileChannel}, "device_platform": {"android"},
+		"device_type": {pb.MobileDeviceType}, "os_version": {pb.MobileOSVersion}, "update_version_code": {pb.MobileVersionCode},
 		"iid": {dev.IID}, "cdid": {dev.CDID}, "device_id": {dev.DeviceID}}
 	for k, values := range params {
 		q[k] = append([]string(nil), values...)
@@ -93,10 +98,10 @@ func signedMobileAPIRequest(ctx context.Context, method, api string, params url.
 			return nil, err
 		}
 		for k, v := range map[string]string{
-			"User-Agent": "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)",
+			"User-Agent": pb.MobileUA,
 			"Accept":     "application/json",
 			"x-khronos":  strconv.FormatUint(uint64(ts), 10),
-			"x-helios":   heliosWithLicense(ts, random32(), mobileLicense),
+			"x-helios":   heliosWithLicense(ts, random32(), m5.License),
 			"x-medusa":   buildMobileMedusa(query, body, ts, dev, signingNonce, signingStarted, random32),
 		} {
 			req.Header.Set(k, v)
@@ -106,27 +111,33 @@ func signedMobileAPIRequest(ctx context.Context, method, api string, params url.
 			req.Header.Set("Content-Encoding", "gzip")
 			req.Header.Set("x-ss-stub", strings.ToUpper(hex.EncodeToString(bh[:])))
 		}
+		if err := applyRemoteSigner(ctx, req, body); err != nil {
+			return nil, err
+		}
 		return req, nil
 	}
 	return nil, errors.New("无法生成播放请求签名")
 }
 
 func buildMobileMedusa(query string, body []byte, ts uint32, dev *device, nonce string, started int64, nextRandom func() uint32) string {
+	prof := activeProfile()
+	pb := prof.raw.Playback
+	m5 := pb.MedusaV5
 	bh := signingBodyHash(body)
 	qh := sm3([]byte(query))
 	f13 := hashF13Profile(qh, bh[:], ts, true)
 	flags := make([]byte, 8)
 	deviceInfo := proto(sf(1, 1), sf(2, 2), sf(3, "8662"), sf(4, dev.DeviceID),
 		sf(5, nonce), sf(6, "!noperm!"), sf(12, "Asia/Shanghai,8"), sf(13, "zh_CN"),
-		sf(22, "12"), sf(25, started), sf(30, "PGT-AN10"), sf(31, "HONOR"), sf(32, "PGT-AN10"), sf(34, "HONOR"))
-	env := proto(sf(6, "v04.10.03.04-bugfix"), sf(8, "vivo_8662_64"), sf(12, deviceInfo), sf(14, "7.4.3.32"))
-	message := proto(sf(1, mobileMagic), sf(2, 5), sf(3, nextRandom()), sf(4, "8662"),
-		sf(5, dev.DeviceID), sf(6, mobileLicense), sf(7, "7.4.3.32"), sf(8, "v04.10.03-ml-android"),
-		sf(9, 0x040a0300), sf(10, flags), sf(12, ts), sf(13, f13), sf(14, qh[:6]),
-		sf(15, proto(sf(1, 1), sf(2, 1), sf(3, 1), sf(5, 1))), sf(17, ts), sf(20, "none"), sf(21, 377), sf(23, env),
-		sf(24, `{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}`))
+		sf(22, pb.MobileOSVersion), sf(25, started), sf(30, pb.MobileDeviceType), sf(31, "HONOR"), sf(32, pb.MobileDeviceType), sf(34, "HONOR"))
+	env := proto(sf(6, m5.EnvVersion), sf(8, pb.MobileChannel), sf(12, deviceInfo), sf(14, pb.MobileVersionName))
+	message := proto(sf(1, prof.magic), sf(2, 5), sf(3, nextRandom()), sf(4, "8662"),
+		sf(5, dev.DeviceID), sf(6, m5.License), sf(7, pb.MobileVersionName), sf(8, m5.SDKVersion),
+		sf(9, m5.SDKCode), sf(10, flags), sf(12, ts), sf(13, f13), sf(14, qh[:6]),
+		sf(15, proto(sf(1, 1), sf(2, 1), sf(3, 1), sf(5, 1))), sf(17, ts), sf(20, "none"), sf(21, m5.MobileField21State), sf(23, env),
+		sf(24, m5.MobileStateJSON))
 	random := nextRandom()
-	hash := sm3(join(mobileSignKey, le32(random), mobileSignKey))
+	hash := sm3(join(prof.signKey, le32(random), prof.signKey))
 	high := random >> 16 & 255
 	seed := le32(^((high<<11 | random>>24) ^ (high >> 5) ^ high))
 	transformed := join(flags, xmxor(message, hash))
@@ -138,9 +149,9 @@ func buildMobileMedusa(query string, body []byte, ts uint32, dev *device, nonce 
 	}
 	check := uint32(0x18000001) | uint32(qh[0]&63)<<14 | uint32(f13[0]&63)<<8
 	packed := join([]byte{0xca}, le32(nextRandom()), le32(check), transformed, []byte{byte(random >> 16), byte(random >> 24)})
-	key, iv := md5.Sum(mobileSignKey[:16]), md5.Sum(mobileSignKey[16:])
+	key, iv := md5.Sum(prof.signKey[:16]), md5.Sum(prof.signKey[16:])
 	encrypted := newSigningCarrier(key[:], ts, true).encrypt(packed, iv[:])
-	prefix := join(le32(5), mobileMagic)
+	prefix := join(le32(5), prof.magic)
 	stamp := le32(ts)
 	for i := range prefix {
 		prefix[i] ^= stamp[i&3]

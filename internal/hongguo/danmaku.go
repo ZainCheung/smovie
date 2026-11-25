@@ -253,14 +253,15 @@ func requestDanmaku(ctx context.Context, seriesID, vid string, start, span int64
 		"business_param": map[string]any{"book_id": seriesID, "start_offset_time": start,
 			"playlet_item_duration": span, "need_danmaku_guide_type": []int{1, 3, 4, 2}},
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, commentAPI+vid+"/v1/?"+query, bytes.NewReader(body))
+	dm := activeProfile().raw.Danmaku
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dm.CommentAPI+vid+"/v1/?"+query, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, commentNonceSize)
 	_, _ = rand.Read(nonce)
 	for k, v := range map[string]string{
-		"User-Agent": commentUA, "Accept": "application/json", "X-XS-From-Web": "0", "Sdk-Version": "2",
+		"User-Agent": dm.CommentUA, "Accept": "application/json", "X-XS-From-Web": "0", "Sdk-Version": "2",
 		"Content-Type": "application/json; charset=utf-8", "Comment-Source": "601", "Server-Channel": "1000",
 	} {
 		req.Header.Set(k, v)

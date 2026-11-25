@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -184,10 +186,46 @@ func (a *app) detailsEpisodes(c *ui.Context, s hongguo.Series) {
 	})
 }
 
-// moreLikeThis shows the series sharing the most tags with s among those
-// loaded.
+// recommendOf lazily loads server-side related dramas via openhongguo,
+// falling back silently to local tag similarity until ready or on failure.
+func (a *app) recommendOf(seriesID string) []hongguo.Series {
+	if a.recommends == nil {
+		a.recommends = map[string]*loaded[[]hongguo.Series]{}
+	}
+	l, ok := a.recommends[seriesID]
+	if !ok {
+		l = &loaded[[]hongguo.Series]{loading: true}
+		a.recommends[seriesID] = l
+		win := a.win
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			items, err := hongguo.Recommend(ctx, seriesID)
+			if win != nil {
+				win.Update(func() {
+					l.loading = false
+					if err != nil {
+						l.err = err
+						return
+					}
+					l.value = &items
+				})
+			}
+		}()
+	}
+	if l.value != nil && len(*l.value) > 0 {
+		return *l.value
+	}
+	return nil
+}
+
+// moreLikeThis prefers server-side related dramas from openhongguo and falls
+// back to the series sharing the most tags with s among those loaded locally.
 func (a *app) moreLikeThis(c *ui.Context, s hongguo.Series, width float32) {
-	similar := a.similar(s, 12)
+	similar := firstN(a.recommendOf(s.ID), 12)
+	if len(similar) == 0 {
+		similar = a.similar(s, 12)
+	}
 	if len(similar) == 0 {
 		return
 	}

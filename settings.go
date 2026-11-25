@@ -28,6 +28,10 @@ type settings struct {
 	// the screen with the player, with the episode's panel beside it.
 	// Windows and Linux always have it.
 	PanelFullScreen bool `json:"panelFullScreen,omitempty"`
+	// SignerURL and SignerToken configure an optional openhongguo-signer
+	// endpoint for emergency signature fallback when built-in signing lags.
+	SignerURL   string `json:"signerUrl,omitempty"`
+	SignerToken string `json:"signerToken,omitempty"`
 }
 
 func defaultSettings() settings { return settings{AutoNext: true, VideoCache: defaultVideoCache} }
@@ -79,7 +83,15 @@ func saveSettings(s settings) {
 // syncSettings saves the settings once they changed; the view calls it,
 // as switches change them in place.
 func (a *app) syncSettings() {
-	cur := settings{AutoNext: a.autoNext, VideoCache: a.videoCache, Quality: a.quality, HoldLock: a.holdLock, PanelFullScreen: a.panelFull}
+	cur := settings{
+		AutoNext:        a.autoNext,
+		VideoCache:      a.videoCache,
+		Quality:         a.quality,
+		HoldLock:        a.holdLock,
+		PanelFullScreen: a.panelFull,
+		SignerURL:       a.saved.SignerURL,
+		SignerToken:     a.saved.SignerToken,
+	}
 	if cur == a.saved {
 		return
 	}

@@ -45,7 +45,7 @@ func join(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
 
 // signedRequest is a POST of payload to an app API, signed as playback's.
 func signedRequest(ctx context.Context, api string, payload []byte, dev *device, now time.Time) (*http.Request, error) {
-	if api == mobileVideoAPI {
+	if api == mobileVideoAPI || api == activeProfile().raw.Playback.MobileVideoAPI {
 		return signedMobileRequest(ctx, payload, dev, now)
 	}
 	return signedAPIRequest(ctx, http.MethodPost, api, nil, payload, dev, now)
@@ -54,8 +54,9 @@ func signedRequest(ctx context.Context, api string, payload []byte, dev *device,
 // The signed bytes must be exactly the bytes sent in the URL and POST body.
 // Search ticket values until Medusa uses the supported branch, as upstream does.
 func signedAPIRequest(ctx context.Context, method, api string, params url.Values, payload []byte, dev *device, now time.Time) (*http.Request, error) {
+	prof := activeProfile()
 	q := url.Values{}
-	for k, v := range deviceQuery {
+	for k, v := range prof.baseDeviceQuery() {
 		q.Set(k, v)
 	}
 	q.Set("device_id", dev.DeviceID)
@@ -80,7 +81,7 @@ func signedAPIRequest(ctx context.Context, method, api string, params url.Values
 			return nil, err
 		}
 		for k, v := range map[string]string{
-			"User-Agent": playbackUA, "Accept": "application/json; charset=utf-8,application/x-protobuf",
+			"User-Agent": prof.raw.Playback.PlaybackUA, "Accept": "application/json; charset=utf-8,application/x-protobuf",
 			"Content-Type": "application/json; charset=UTF-8", "x-ss-req-ticket": ticket,
 			"sdk-version": "2", "x-xs-from-web": "0", "x-khronos": strconv.FormatUint(uint64(ts), 10),
 			"x-gorgon": xGorgon(query, payload, ts, uint16(random32())),
@@ -109,6 +110,9 @@ func signedAPIRequest(ctx context.Context, method, api string, params url.Values
 		}
 		if dev.Cookie != "" {
 			req.Header.Set("Cookie", dev.Cookie)
+		}
+		if err := applyRemoteSigner(ctx, req, payload); err != nil {
+			return nil, err
 		}
 		return req, nil
 	}
@@ -458,7 +462,8 @@ func newSigningCarrier(key []byte, ts uint32, v5 bool) *aesV3 {
 	}
 	a.wire, a.compact = [8]uint{5, 6, 2, 4, 3, 1, 0, 7}, [8]uint{1, 6, 0, 7, 2, 4, 5, 3}
 	if v5 {
-		a.box = mobileSbox[n*256 : (n+1)*256]
+		sbox := activeProfile().sbox
+		a.box = sbox[n*256 : (n+1)*256]
 		a.permutation = [4][4]int{{2, 0, 3, 1}, {1, 3, 2, 0}, {3, 2, 1, 0}, {2, 3, 1, 0}}[n]
 		a.order = [4][16]int{{0, 9, 14, 15, 4, 13, 2, 7, 8, 1, 6, 3, 12, 5, 10, 11}, {0, 9, 14, 11, 4, 13, 2, 3, 8, 1, 6, 15, 12, 5, 10, 7}, {0, 9, 14, 3, 4, 13, 2, 15, 8, 1, 6, 11, 12, 5, 10, 7}, {0, 9, 14, 15, 4, 13, 2, 3, 8, 1, 6, 11, 12, 5, 10, 7}}[n]
 		a.wire, a.compact = [8]uint{6, 5, 3, 4, 2, 7, 1, 0}, [8]uint{1, 7, 3, 6, 2, 0, 4, 5}

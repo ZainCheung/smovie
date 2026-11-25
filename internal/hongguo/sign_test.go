@@ -155,8 +155,37 @@ func (f signingTransport) RoundTrip(r *http.Request) (*http.Response, error) { r
 func isolatePlaybackSession(t *testing.T) {
 	t.Helper()
 	old := playbackDevice
+	oldProfile := currentProfile.Load()
+	oldSigner := CurrentSignerConfig()
+	ohgMu.Lock()
+	oldBackup := ohgBackupEnabled
+	oldTransport := ohgTransportOverride
+	ohgBackupEnabled = false
+	ohgTransportOverride = nil
+	ohgClient = nil
+	ohgMu.Unlock()
+	_ = SetSignerConfig("", "")
+	base, err := compileProfile(embeddedProfileJSON, "", "embedded", time.Time{})
+	if err == nil {
+		// Legacy unit tests in sign_test.go / playback_profile_test.go /
+		// play_compatibility_test.go assert exact request counts along the
+		// v5_post -> v5_tab -> v5_full chain. Pin that chain here while new
+		// tests explicitly exercise video_model_v5 and openhongguo routes.
+		base.raw.Playback.RouteOrder = []string{"v5_post", "v5_tab", "v5_full"}
+		base.routeSet = map[string]bool{"v5_post": true, "v5_tab": true, "v5_full": true}
+		currentProfile.Store(base)
+	}
 	playbackDevice = nil
-	t.Cleanup(func() { playbackDevice = old })
+	t.Cleanup(func() {
+		playbackDevice = old
+		currentProfile.Store(oldProfile)
+		_ = SetSignerConfig(oldSigner.URL, oldSigner.Token)
+		ohgMu.Lock()
+		ohgBackupEnabled = oldBackup
+		ohgTransportOverride = oldTransport
+		ohgClient = nil
+		ohgMu.Unlock()
+	})
 }
 
 // Exercise the real resolver, including empty-response device renewal. A signer

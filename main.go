@@ -126,35 +126,49 @@ type app struct {
 	updates    bool
 	autoUpdate bool
 	newVersion string
+
+	// Hot-updatable protocol policy status and optional remote signer inputs.
+	protocolStatus   hongguo.ProtocolStatus
+	protocolChecking bool
+	signerURL        string
+	signerToken      string
+
+	// Remote related recommendations (by series ID) and trending search queries.
+	recommends map[string]*loaded[[]hongguo.Series]
+	hotSearch  *loaded[[]hongguo.HotQuery]
 }
 
 func newApp() *app {
 	st := loadSettings()
 	a := &app{
-		page:         "home",
-		backTo:       "home",
-		feeds:        map[string]*feed{},
-		aspects:      map[string]float32{},
-		scrolls:      map[string]*ui.ScrollState{},
-		lib:          newLibrary(),
-		theme:        netflixTheme(),
-		history:      loadHistory(),
-		myList:       loadMyList(),
-		albums:       loadAlbums(),
-		genre:        map[string]string{},
-		board:        hongguo.Rankings[0].Slug,
-		seasons:      map[string]*loaded[[]hongguo.Season]{},
-		episodeCache: map[string]*hongguo.Detail{},
-		infos:        map[string]*loaded[hongguo.SeriesInfo]{},
-		epInfos:      map[string]*loaded[hongguo.EpisodeInfo]{},
-		autoNext:     st.AutoNext,
-		holdLock:     st.HoldLock,
-		panelFull:    st.PanelFullScreen,
-		saved:        st,
-		videoCache:   st.VideoCache,
-		quality:      st.Quality,
-		current:      -1,
-		heroAt:       time.Now(),
+		page:           "home",
+		backTo:         "home",
+		feeds:          map[string]*feed{},
+		aspects:        map[string]float32{},
+		scrolls:        map[string]*ui.ScrollState{},
+		lib:            newLibrary(),
+		theme:          netflixTheme(),
+		history:        loadHistory(),
+		myList:         loadMyList(),
+		albums:         loadAlbums(),
+		genre:          map[string]string{},
+		board:          hongguo.Rankings[0].Slug,
+		seasons:        map[string]*loaded[[]hongguo.Season]{},
+		episodeCache:   map[string]*hongguo.Detail{},
+		infos:          map[string]*loaded[hongguo.SeriesInfo]{},
+		epInfos:        map[string]*loaded[hongguo.EpisodeInfo]{},
+		recommends:     map[string]*loaded[[]hongguo.Series]{},
+		autoNext:       st.AutoNext,
+		holdLock:       st.HoldLock,
+		panelFull:      st.PanelFullScreen,
+		signerURL:      st.SignerURL,
+		signerToken:    st.SignerToken,
+		protocolStatus: hongguo.CurrentProtocolStatus(),
+		saved:          st,
+		videoCache:     st.VideoCache,
+		quality:        st.Quality,
+		current:        -1,
+		heroAt:         time.Now(),
 	}
 	a.lib.limit.Store(videoCacheSizes[st.VideoCache])
 	go a.lib.prune()
@@ -635,7 +649,15 @@ var onReady func(*app)
 func main() {
 	// The danmaku API hands each anonymous identity its own subset: keep one.
 	hongguo.DanmakuIdentityFile = filepath.Join(configDir(), "danmaku-device.json")
+	hongguo.SetOpenhongguoProfileFile(filepath.Join(configDir(), "openhongguo-device.json"))
+	hongguo.InitProtocol(hongguo.ProtocolOptions{
+		CacheDir:   configDir(),
+		AppVersion: mygo.App.Version(),
+	})
 	a := newApp()
+	if a.signerURL != "" {
+		_ = hongguo.SetSignerConfig(a.signerURL, a.signerToken)
+	}
 	srv, err := startMediaServer(a.lib, playerEvents{step: a.step, retry: a.retry, meta: a.meta, progress: a.progress, fullScreen: a.fullScreen, quality: a.setQuality})
 	if err != nil {
 		log.Fatal(err)
@@ -675,6 +697,13 @@ func main() {
 			a.ensureFeed(cat.Slug)
 		}
 		a.watchUpdates()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if st, err := hongguo.RefreshProtocol(ctx); err == nil {
+				win.Update(func() { a.protocolStatus = st })
+			}
+		}()
 		if onReady != nil {
 			onReady(a)
 		}

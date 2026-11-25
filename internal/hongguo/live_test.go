@@ -2,7 +2,9 @@ package hongguo
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -153,5 +155,106 @@ func TestLiveCatalog(t *testing.T) {
 			t.Fatalf("%s: %v", r.Slug, err)
 		}
 		t.Logf("%s p2/%d: %s %s", r.Label, p.TotalPages, p.Items[0].Title, p.Items[0].Heat)
+	}
+}
+
+// TestLiveContract exercises the full public + playback + decryption contract
+// for scheduled CI drift detection. Run with SMOVIE_LIVE=1.
+// Set SMOVIE_CONTRACT_OUT to write a redacted JSON summary (no URLs/IDs/keys).
+func TestLiveContract(t *testing.T) {
+	if os.Getenv("SMOVIE_LIVE") == "" {
+		t.Skip("set SMOVIE_LIVE=1 to run the live contract check")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	type contractSummary struct {
+		CheckedAt      string   `json:"checked_at"`
+		ProtocolVer    string   `json:"protocol_version"`
+		BrowseCount    int      `json:"browse_count"`
+		SearchCount    int      `json:"search_count"`
+		EpisodeCount   int      `json:"episode_count"`
+		Codec          string   `json:"codec"`
+		Quality        string   `json:"quality"`
+		Encrypted      bool     `json:"encrypted"`
+		Qualities      []int    `json:"qualities"`
+		DecodedFrameOK bool     `json:"decoded_frame_ok"`
+		DanmakuCount   int      `json:"danmaku_count"`
+		HotSearchCount int      `json:"hot_search_count"`
+		RankCount      int      `json:"rank_count"`
+		Errors         []string `json:"errors,omitempty"`
+	}
+	summary := contractSummary{
+		CheckedAt:   time.Now().UTC().Format(time.RFC3339),
+		ProtocolVer: CurrentProtocolStatus().Version,
+	}
+	defer func() {
+		outDir := os.Getenv("SMOVIE_CONTRACT_OUT")
+		if outDir == "" {
+			return
+		}
+		_ = os.MkdirAll(outDir, 0o755)
+		b, _ := json.MarshalIndent(summary, "", "  ")
+		_ = os.WriteFile(filepath.Join(outDir, "summary.json"), b, 0o644)
+	}()
+
+	p, err := Browse(ctx, Categories[0].Slug, 1)
+	if err != nil || len(p.Items) == 0 {
+		summary.Errors = append(summary.Errors, "browse")
+		t.Fatalf("browse failed: %v", err)
+	}
+	summary.BrowseCount = len(p.Items)
+
+	query := os.Getenv("SMOVIE_CONTRACT_QUERY")
+	if query == "" {
+		query = "重生"
+	}
+	s, err := Search(ctx, query, 1)
+	if err != nil || len(s.Items) == 0 {
+		summary.Errors = append(summary.Errors, "search")
+		t.Fatalf("search failed: %v", err)
+	}
+	summary.SearchCount = len(s.Items)
+
+	d, err := Episodes(ctx, s.Items[0].ID)
+	if err != nil || len(d.VIDs) == 0 {
+		summary.Errors = append(summary.Errors, "episodes")
+		t.Fatalf("episodes failed: %v", err)
+	}
+	summary.EpisodeCount = len(d.VIDs)
+
+	vid := d.VIDs[len(d.VIDs)-1]
+	info, err := ResolvePlay(ctx, vid, 0)
+	if err != nil {
+		summary.Errors = append(summary.Errors, "resolve_play")
+		t.Fatalf("resolve play failed: %v", err)
+	}
+	summary.Codec = info.Codec
+	summary.Quality = info.Quality
+	summary.Encrypted = info.ContentKey != ""
+	summary.Qualities = info.Qualities
+
+	dst := filepath.Join(t.TempDir(), "contract.mp4")
+	if err := Download(ctx, info, dst, nil); err != nil {
+		summary.Errors = append(summary.Errors, "download")
+		t.Fatalf("download/decrypt failed: %v", err)
+	}
+	if ffmpegPath, lookErr := exec.LookPath("ffmpeg"); lookErr == nil {
+		cmd := exec.CommandContext(ctx, ffmpegPath, "-v", "error", "-xerror", "-i", dst, "-frames:v", "1", "-f", "null", "-")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			summary.Errors = append(summary.Errors, "ffmpeg_decode")
+			t.Fatalf("ffmpeg frame decode failed: %v (%s)", err, string(out))
+		}
+		summary.DecodedFrameOK = true
+	}
+
+	if rankPage, err := Rank(ctx, Rankings[0].Slug, 1); err == nil {
+		summary.RankCount = len(rankPage.Items)
+	}
+	if dm, err := FetchDanmaku(ctx, d.ID, d.VIDs[0]); err == nil {
+		summary.DanmakuCount = len(dm)
+	}
+	if hot, err := HotSearch(ctx); err == nil {
+		summary.HotSearchCount = len(hot)
 	}
 }
