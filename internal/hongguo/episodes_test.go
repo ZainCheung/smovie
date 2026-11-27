@@ -267,3 +267,78 @@ func TestEpisodeSocialReturnsErrLockedForLayoutOnlyPage(t *testing.T) {
 		t.Fatalf("expected ErrLocked for layout-only numeric vid page, got %v", err)
 	}
 }
+
+func TestEpisodesReturnsErrNotReleasedWithoutFallingThroughTo404(t *testing.T) {
+	isolatePlaybackSession(t)
+	isolateDeviceRetry(t)
+	oldSite := siteClient
+	t.Cleanup(func() { siteClient = oldSite })
+
+	const sid = "7711670675403983897"
+	siteCalled := false
+	siteClient = &http.Client{Transport: signingTransport(func(req *http.Request) (*http.Response, error) {
+		siteCalled = true
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	})}
+
+	ohgMu.Lock()
+	ohgBackupEnabled = true
+	ohgClient = nil
+	ohgTransportOverride = funcSDKTransport(func(ctx context.Context, req *sdk.Request) (*sdk.Response, error) {
+		if resp, ok := mockOpenhongguoRegister(req); ok {
+			return resp, nil
+		}
+		if strings.Contains(req.URL, "/novel/player/multi_video_detail/player/v1") {
+			return &sdk.Response{
+				StatusCode: 200,
+				Body: []byte(`{"code":0,"data":{"7711670675403983897":{"video_data":{
+					"series_id_str":"7711670675403983897",
+					"series_title":"符仙人：符道之祖第十八季",
+					"episode_cnt":0,
+					"episode_right_text":"全0集",
+					"video_list":[]
+				}}}}`),
+			}, nil
+		}
+		t.Fatalf("unexpected fallback request for unreleased series: %s", req.URL)
+		return nil, nil
+	})
+	ohgMu.Unlock()
+
+	_, err := Episodes(context.Background(), sid)
+	if err != ErrNotReleased {
+		t.Fatalf("expected ErrNotReleased, got %v", err)
+	}
+	if siteCalled {
+		t.Fatal("should not fall through to website 404 for unreleased series")
+	}
+}
+
+func TestSeasonsViaOpenhongguoSkipsUnreleasedZeroEpisodeSeasons(t *testing.T) {
+	isolatePlaybackSession(t)
+	ohgMu.Lock()
+	ohgBackupEnabled = true
+	ohgClient = nil
+	ohgTransportOverride = funcSDKTransport(func(ctx context.Context, req *sdk.Request) (*sdk.Response, error) {
+		if resp, ok := mockOpenhongguoRegister(req); ok {
+			return resp, nil
+		}
+		return &sdk.Response{
+			StatusCode: 200,
+			Body: []byte(`{"code":0,"data":{"album_data":{"album_id":"7667228805131406360","album_title":"符仙人","season_cnt":2,"series_list":[
+				{"series_id":"7710256822552103998","series_title":"符仙人第十七季","season_index":17,"episode_cnt":290,"series_cover":"https://img.example.com/s17.jpg"},
+				{"series_id":"7711670675403983897","series_title":"符仙人第十八季","season_index":18,"episode_cnt":0,"series_cover":"https://img.example.com/s18.jpg"}
+			]}}}`),
+		}, nil
+	})
+	ohgMu.Unlock()
+
+	seed := Series{ID: "7710256822552103998", Title: "符仙人第十七季", EpisodeCount: 290}
+	seasons, err := SeasonsProgress(context.Background(), seed, "7667228805131406360", nil)
+	if err != nil {
+		t.Fatalf("SeasonsProgress failed: %v", err)
+	}
+	if len(seasons) != 1 || seasons[0].ID != "7710256822552103998" {
+		t.Fatalf("expected unreleased season to be filtered out, got %+v", seasons)
+	}
+}

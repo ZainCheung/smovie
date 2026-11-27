@@ -470,6 +470,11 @@ func seasonsViaOpenhongguo(ctx context.Context, seed Series, albumID string) ([]
 		if !seriesIDPattern.MatchString(ms.SeriesID) || seen[ms.SeriesID] {
 			continue
 		}
+		// Skip upcoming/unreleased seasons that have no published episodes yet,
+		// unless it is the seed series currently being viewed.
+		if ms.EpisodeCount <= 0 && ms.SeriesID != seed.ID {
+			continue
+		}
 		seen[ms.SeriesID] = true
 		idx := ms.Index
 		if idx <= 0 {
@@ -654,6 +659,9 @@ func episodesViaOpenhongguo(ctx context.Context, seriesID string) (*Detail, erro
 		for _, item := range batch {
 			if item.Series != nil && item.Series.ID != "" && item.Series.ID != seriesID {
 				continue
+			}
+			if item.Series != nil && len(item.Episodes) == 0 && item.Series.EpisodeCount == 0 && strings.TrimSpace(item.Series.Title) != "" {
+				return nil, ErrNotReleased
 			}
 			d, convErr := detailFromOpenhongguo(seriesID, item.Series, item.Episodes)
 			if convErr == nil {

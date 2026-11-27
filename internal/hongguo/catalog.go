@@ -297,6 +297,10 @@ const (
 	multiVideoDetailPreloadPath = "/novel/player/multi_video_detail/preload/v1"
 )
 
+// ErrNotReleased indicates the upstream service recognizes the series ID but
+// reports zero episodes (an upcoming or unreleased season/drama).
+var ErrNotReleased = errors.New("该剧暂未上线，暂无可播放分集")
+
 // Episodes loads a series' full episode list. The official website truncated
 // vid_list to preview episodes and replaced numeric IDs with obfuscated v1_
 // tokens, so this prefers signed App detail endpoints (openhongguo first, then
@@ -311,6 +315,9 @@ func Episodes(ctx context.Context, seriesID string) (*Detail, error) {
 		if d, err := episodesViaOpenhongguo(ctx, seriesID); err == nil {
 			return d, nil
 		} else {
+			if errors.Is(err, ErrNotReleased) {
+				return nil, ErrNotReleased
+			}
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
 			}
@@ -320,6 +327,9 @@ func Episodes(ctx context.Context, seriesID string) (*Detail, error) {
 	if d, err := episodesViaAppVideoDetail(ctx, seriesID); err == nil {
 		return d, nil
 	} else {
+		if errors.Is(err, ErrNotReleased) {
+			return nil, ErrNotReleased
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
 		}
@@ -328,6 +338,9 @@ func Episodes(ctx context.Context, seriesID string) (*Detail, error) {
 	if d, err := episodesViaAppPreload(ctx, seriesID); err == nil {
 		return d, nil
 	} else {
+		if errors.Is(err, ErrNotReleased) {
+			return nil, ErrNotReleased
+		}
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
 		}
@@ -458,6 +471,9 @@ func parseAppSeriesVideoData(seriesID string, v appSeriesVideoData) (*Detail, er
 		return nil, errors.New("剧集详情接口返回了其他剧集")
 	}
 	if len(v.VideoList) == 0 {
+		if int(v.Episodes) == 0 && (strings.TrimSpace(v.Title) != "" || strings.TrimSpace(v.Name) != "") {
+			return nil, ErrNotReleased
+		}
 		return nil, errors.New("剧集详情接口未返回分集")
 	}
 	type indexedEp struct {

@@ -61,7 +61,7 @@ func saveMyList(list []listed) {
 	}()
 }
 
-func (a *app) inMyList(id string) bool {
+func (a *app) inMyListOnly(id string) bool {
 	for _, l := range a.myList {
 		if l.Series.ID == id {
 			return true
@@ -70,21 +70,59 @@ func (a *app) inMyList(id string) bool {
 	return false
 }
 
-// toggleMyList adds the series to the front of My List, or takes it out.
-func (a *app) toggleMyList(c *ui.Context, s hongguo.Series) {
-	if a.inMyList(s.ID) {
-		var out []listed
-		for _, l := range a.myList {
-			if l.Series.ID != s.ID {
-				out = append(out, l)
+// followedAlbumOf returns the index in a.albums of the followed collection
+// containing seriesID, or -1 if none.
+func (a *app) followedAlbumOf(seriesID string) int {
+	for i, f := range a.albums {
+		if hasSeason(f.Seasons, seriesID) {
+			return i
+		}
+	}
+	for _, d := range []*hongguo.Detail{a.detail, a.details, a.episodeCache[seriesID]} {
+		if d != nil && d.ID == seriesID && d.AlbumID != "" {
+			if i := a.followIndex(d.AlbumID); i >= 0 {
+				return i
 			}
 		}
-		a.myList = out
-		c.Toast("已从我的片单移除")
-	} else {
-		a.myList = append([]listed{{Series: s, Added: time.Now()}}, a.myList...)
-		c.Toast("已加入我的片单")
 	}
+	return -1
+}
+
+// inMyList reports whether the series is in My List directly or through a
+// followed collection.
+func (a *app) inMyList(id string) bool {
+	return a.inMyListOnly(id) || a.followedAlbumOf(id) >= 0
+}
+
+// toggleMyList adds the series to the front of My List, or removes it (and
+// unfollows its collection when the series was covered by one).
+func (a *app) toggleMyList(c *ui.Context, s hongguo.Series) {
+	inList := a.inMyListOnly(s.ID)
+	albumIdx := a.followedAlbumOf(s.ID)
+	if inList || albumIdx >= 0 {
+		if inList {
+			var out []listed
+			for _, l := range a.myList {
+				if l.Series.ID != s.ID {
+					out = append(out, l)
+				}
+			}
+			a.myList = out
+			saveMyList(append([]listed(nil), a.myList...))
+		}
+		if albumIdx >= 0 {
+			a.albums = append(a.albums[:albumIdx:albumIdx], a.albums[albumIdx+1:]...)
+			a.saveFollowed()
+		}
+		if albumIdx >= 0 && !inList {
+			c.Toast("已取消订阅合集")
+		} else {
+			c.Toast("已从我的片单移除")
+		}
+		return
+	}
+	a.myList = append([]listed{{Series: s, Added: time.Now()}}, a.myList...)
+	c.Toast("已加入我的片单")
 	saveMyList(append([]listed(nil), a.myList...))
 }
 

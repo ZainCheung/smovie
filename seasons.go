@@ -73,6 +73,24 @@ func (a *app) loadSeasons(album string, seed hongguo.Series, l *loaded[[]hongguo
 
 func seasonCachePath() string { return filepath.Join(configDir(), "seasons.json") }
 
+// playableSeasons drops upcoming/unreleased placeholder seasons (zero episodes)
+// that older caches or upstream album feeds may include.
+func playableSeasons(list []hongguo.Season) []hongguo.Season {
+	if len(list) == 0 {
+		return list
+	}
+	out := make([]hongguo.Season, 0, len(list))
+	for _, s := range list {
+		if s.EpisodeCount > 0 || s.EpisodeLabel != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return list
+	}
+	return out
+}
+
 // seasonCache is the seasons of the collections looked at before, by
 // album, read from the disk once.
 func (a *app) seasonCache() map[string][]hongguo.Season {
@@ -80,6 +98,9 @@ func (a *app) seasonCache() map[string][]hongguo.Season {
 		a.seasonDisk = map[string][]hongguo.Season{}
 		if data, err := os.ReadFile(seasonCachePath()); err == nil {
 			_ = json.Unmarshal(data, &a.seasonDisk)
+			for k, v := range a.seasonDisk {
+				a.seasonDisk[k] = playableSeasons(v)
+			}
 		}
 	}
 	return a.seasonDisk
@@ -163,9 +184,10 @@ func (a *app) seasonsPanel(c *ui.Context, l *loaded[[]hongguo.Season], width flo
 // playing it, or a mark on the season that plays.
 func (a *app) seasonRow(c *ui.Context, s hongguo.Season, width float32) {
 	cur := a.detail != nil && a.detail.ID == s.ID
+	unreleased := !cur && s.EpisodeCount <= 0 && s.EpisodeLabel == ""
 	row := ui.ButtonBase(c.Key("season" + s.ID)).Width(width).Padding(8).Radius(10).Gap(12).AlignItems(ui.Center).
-		Label(fmt.Sprintf("第%d季 %s", s.Index, s.Title))
-	hover := row.Hovered()
+		Disabled(unreleased).Label(fmt.Sprintf("第%d季 %s", s.Index, s.Title))
+	hover := row.Hovered() && !unreleased
 	switch {
 	case cur:
 		row.Background(rgba(255, 255, 255, 22)).Border(1, withAlpha(colorRed, 160))
@@ -189,6 +211,8 @@ func (a *app) seasonRow(c *ui.Context, s hongguo.Season, width float32) {
 			sub := fmt.Sprintf("第%d季", s.Index)
 			switch {
 			case cur:
+			case unreleased:
+				sub += " · 暂未上线"
 			case s.Heat != "":
 				sub += " · " + s.Heat
 			case s.EpisodeLabel != "":
@@ -206,6 +230,11 @@ func (a *app) seasonRow(c *ui.Context, s hongguo.Season, width float32) {
 			})
 			return
 		}
+		if unreleased {
+			ui.Text(c, "待上线").Shrink(0).FontSize(12).FontWeight(600).Padding(6, 12).Radius(8).
+				TextColor(colorFaint).Background(rgba(255, 255, 255, 12))
+			return
+		}
 		label := "播放"
 		if w, ok := a.watchOf(s.ID); ok && !w.Finished {
 			label = "继续"
@@ -213,7 +242,7 @@ func (a *app) seasonRow(c *ui.Context, s hongguo.Season, width float32) {
 		ui.Text(c, label).Shrink(0).FontSize(13).FontWeight(600).Padding(7, 16).Radius(8).
 			Background(rgba(255, 255, 255, 26+30*b2f(hover)))
 	})
-	if row.Clicked() && !cur {
+	if row.Clicked() && !cur && !unreleased {
 		a.open(s.Series)
 	}
 }
@@ -254,6 +283,12 @@ func loadAlbums() []followed {
 	}
 	var list []followed
 	_ = json.Unmarshal(data, &list)
+	for i := range list {
+		list[i].Seasons = playableSeasons(list[i].Seasons)
+		if list[i].Seen > len(list[i].Seasons) {
+			list[i].Seen = len(list[i].Seasons)
+		}
+	}
 	return list
 }
 
