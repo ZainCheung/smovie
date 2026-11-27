@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -484,77 +483,6 @@ func (a *app) categoryPage(c *ui.Context, slug string) {
 			return
 		}
 		a.posterGrid(c, key, list)
-	})
-}
-
-func (a *app) ensureHotSearch() []hongguo.HotQuery {
-	if a.hotSearch == nil {
-		l := &loaded[[]hongguo.HotQuery]{loading: true}
-		a.hotSearch = l
-		win := a.win
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			items, err := hongguo.HotSearch(ctx)
-			if win != nil {
-				win.Update(func() {
-					l.loading = false
-					if err != nil {
-						l.err = err
-						return
-					}
-					l.value = &items
-				})
-			}
-		}()
-	}
-	if a.hotSearch.value != nil {
-		return *a.hotSearch.value
-	}
-	return nil
-}
-
-func (a *app) hotSearchChips(c *ui.Context) {
-	hot := firstN(a.ensureHotSearch(), 10)
-	if len(hot) == 0 {
-		return
-	}
-	ui.Row(c.Key("hot-search")).Wrap().Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, "大家都在搜").FontSize(12).FontWeight(700).TextColor(colorFaint)
-		for i, h := range hot {
-			chip := ui.ButtonBase(c.Key(fmt.Sprintf("hot-%d", i))).Padding(5, 12).Radius(14).Label(h.Title)
-			bg := uint8(18)
-			if chip.Hovered() {
-				bg = 36
-			}
-			chip.Background(rgba(255, 255, 255, float32(bg)))
-			chip.Children(func() {
-				ui.Text(c, h.Title).FontSize(12).TextColor(colorMuted).SingleLine()
-			})
-			if chip.Clicked() {
-				a.query = h.Title
-				a.search(h.Title)
-			}
-		}
-	})
-}
-
-func (a *app) searchPage(c *ui.Context) {
-	f := a.feed("search")
-	ui.Column(c).Gap(18).Padding(navHeight+28, pagePad, 56, pagePad).Children(func() {
-		ui.Row(c).AlignItems(ui.End).Gap(12).Children(func() {
-			ui.Text(c, "“"+a.searched+"”").FontSize(28).FontWeight(800)
-			ui.Text(c, "的搜索结果").FontSize(16).TextColor(colorMuted)
-		})
-		a.hotSearchChips(c)
-		if !f.loading && f.err == "" && len(f.items) == 0 {
-			ui.Column(c).Padding(80, 0).Center().Gap(10).Children(func() {
-				ui.Icon(c, iconSearch).Size(40, 40).TextColor(colorFaint)
-				ui.Text(c, "没有找到相关短剧，换个关键词试试").TextColor(colorMuted)
-			})
-			return
-		}
-		a.posterGrid(c, "search", f)
 	})
 }
 

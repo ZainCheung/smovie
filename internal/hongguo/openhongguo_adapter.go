@@ -640,3 +640,103 @@ func isOpenhongguoBackupEnabled() bool {
 	defer ohgMu.Unlock()
 	return ohgBackupEnabled
 }
+
+// episodesViaOpenhongguo fetches a series and its full episode list via
+// openhongguo's signed App APIs (GetSeriesBatch first, falling back to
+// ListEpisodes on /novel/player/video_detail/v1/).
+func episodesViaOpenhongguo(ctx context.Context, seriesID string) (*Detail, error) {
+	c, err := getOpenhongguoClient()
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	if batch, err := c.GetSeriesBatch(ctx, []string{seriesID}); err == nil {
+		for _, item := range batch {
+			if item.Series != nil && item.Series.ID != "" && item.Series.ID != seriesID {
+				continue
+			}
+			d, convErr := detailFromOpenhongguo(seriesID, item.Series, item.Episodes)
+			if convErr == nil {
+				return d, nil
+			}
+			lastErr = convErr
+		}
+		if lastErr == nil {
+			lastErr = errors.New("openhongguo 批量接口未返回分集")
+		}
+	} else {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		lastErr = err
+	}
+
+	page, err := c.ListEpisodes(ctx, seriesID, sdk.EpisodeOptions{})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	if page == nil || len(page.Items) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, errors.New("openhongguo 未返回分集列表")
+	}
+	return detailFromOpenhongguo(seriesID, nil, page.Items)
+}
+
+func detailFromOpenhongguo(seriesID string, s *model.Series, eps []model.Episode) (*Detail, error) {
+	if len(eps) == 0 {
+		return nil, errors.New("分集列表为空")
+	}
+	ordered := append([]model.Episode(nil), eps...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Number != ordered[j].Number {
+			return ordered[i].Number < ordered[j].Number
+		}
+		return i < j
+	})
+	vids := make([]string, 0, len(ordered))
+	seen := make(map[string]bool, len(ordered))
+	for _, ep := range ordered {
+		id := strings.TrimSpace(ep.ID)
+		if !vidPattern.MatchString(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		vids = append(vids, id)
+	}
+	if len(vids) == 0 {
+		return nil, errors.New("分集编号无效")
+	}
+	d := &Detail{
+		Series: Series{
+			ID:           seriesID,
+			EpisodeCount: len(vids),
+			EpisodeLabel: fmt.Sprintf("全%d集", len(vids)),
+		},
+		VIDs: vids,
+	}
+	if s != nil {
+		d.Title = strings.TrimSpace(s.Title)
+		d.Cover = ohgSafeCoverURL(s.CoverURL)
+		d.Intro = strings.TrimSpace(s.Description)
+		if s.EpisodeCount > d.EpisodeCount {
+			d.EpisodeCount = s.EpisodeCount
+		}
+		if label := strings.TrimSpace(s.RightText); label != "" {
+			d.EpisodeLabel = label
+		} else if d.EpisodeCount > 0 {
+			d.EpisodeLabel = fmt.Sprintf("全%d集", d.EpisodeCount)
+		}
+		if cat := strings.TrimSpace(s.Category); cat != "" {
+			d.Tags = []string{cat}
+		}
+		if album := strings.TrimSpace(s.RelatedAlbumID); seriesIDPattern.MatchString(album) && album != "0" {
+			d.AlbumID = album
+		}
+	}
+	return d, nil
+}

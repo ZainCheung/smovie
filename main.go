@@ -123,9 +123,13 @@ type app struct {
 	// updates is whether the updater runs, which it does not in tests;
 	// autoUpdate whether it checks in the background, and newVersion the
 	// newer version its last check found.
-	updates    bool
-	autoUpdate bool
-	newVersion string
+	updates           bool
+	autoUpdate        bool
+	newVersion        string
+	pendingUpdate     *appUpdate
+	updateDownloading bool
+	updateProgress    float32
+	pendingToast      string
 
 	// Hot-updatable protocol policy status and optional remote signer inputs.
 	protocolStatus   hongguo.ProtocolStatus
@@ -133,9 +137,16 @@ type app struct {
 	signerURL        string
 	signerToken      string
 
-	// Remote related recommendations (by series ID) and trending search queries.
-	recommends map[string]*loaded[[]hongguo.Series]
-	hotSearch  *loaded[[]hongguo.HotQuery]
+	// Remote related recommendations (by series ID), trending search queries,
+	// and live search page state.
+	recommends          map[string]*loaded[[]hongguo.Series]
+	hotSearch           *loaded[[]hongguo.HotQuery]
+	searchInput         ui.Handle
+	searchSuggestions   []string
+	suggestSeq          int
+	suggestQuery        string
+	searchDebounceAt    time.Time
+	searchDebounceQuery string
 }
 
 func newApp() *app {
@@ -200,6 +211,7 @@ func (a *app) loadFeed(key string, page int) {
 	seq := f.seq
 	f.loading, f.err = true, ""
 	query := a.searched
+	win := a.win
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -215,7 +227,10 @@ func (a *app) loadFeed(key string, page int) {
 		default:
 			p, err = hongguo.Browse(ctx, key, page)
 		}
-		a.win.Update(func() {
+		if win == nil {
+			return
+		}
+		win.Update(func() {
 			if seq != f.seq {
 				return
 			}
@@ -283,15 +298,33 @@ func (a *app) refreshFeeds() {
 	}
 }
 
+func (a *app) openSearch(c *ui.Context) {
+	a.go_("search")
+	a.scroll("search").Y = 0
+	if c != nil {
+		a.searchInput.Focus(c)
+	}
+}
+
 func (a *app) search(q string) {
 	q = strings.TrimSpace(q)
+	a.searchDebounceQuery = ""
+	a.searchDebounceAt = time.Time{}
 	if q == "" {
+		a.searched = ""
+		f := a.feed("search")
+		f.seq++
+		f.items = nil
+		f.loading = false
+		f.err = ""
+		f.page, f.totalPages = 0, 0
 		return
 	}
 	a.searched = q
 	a.feed("search").items = nil
 	a.loadFeed("search", 1)
 	a.go_("search")
+	a.scroll("search").Y = 0
 }
 
 // go_ shows a page.
@@ -697,6 +730,7 @@ func main() {
 			a.ensureFeed(cat.Slug)
 		}
 		a.watchUpdates()
+		a.checkForUpdateOnLaunch()
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()

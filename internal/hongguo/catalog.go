@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -291,12 +292,47 @@ type Detail struct {
 	AlbumID string
 }
 
-// Episodes loads a series' episode list from its public player page.
+const (
+	videoDetailPath             = "/novel/player/video_detail/v1/"
+	multiVideoDetailPreloadPath = "/novel/player/multi_video_detail/preload/v1"
+)
+
+// Episodes loads a series' full episode list. The official website truncated
+// vid_list to preview episodes and replaced numeric IDs with obfuscated v1_
+// tokens, so this prefers signed App detail endpoints (openhongguo first, then
+// built-in signed video_detail/v1 and multi_video_detail/preload/v1) and keeps
+// the public website as a last-resort fallback.
 func Episodes(ctx context.Context, seriesID string) (*Detail, error) {
 	if !seriesIDPattern.MatchString(seriesID) {
 		return nil, errors.New("剧集编号无效")
 	}
 	var lastErr error
+	if isOpenhongguoBackupEnabled() {
+		if d, err := episodesViaOpenhongguo(ctx, seriesID); err == nil {
+			return d, nil
+		} else {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
+			}
+			lastErr = err
+		}
+	}
+	if d, err := episodesViaAppVideoDetail(ctx, seriesID); err == nil {
+		return d, nil
+	} else {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
+		}
+		lastErr = err
+	}
+	if d, err := episodesViaAppPreload(ctx, seriesID); err == nil {
+		return d, nil
+	} else {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
+		}
+		lastErr = err
+	}
 	for _, u := range []string{
 		SiteOrigin + "/player/" + seriesID,
 		SiteOrigin + "/detail?series_id=" + seriesID,
@@ -305,9 +341,191 @@ func Episodes(ctx context.Context, seriesID string) (*Detail, error) {
 		if err == nil {
 			return d, nil
 		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("获取分集失败：%w", ctx.Err())
+		}
 		lastErr = err
 	}
 	return nil, fmt.Errorf("获取分集失败：%w", lastErr)
+}
+
+type appSeriesEpisode struct {
+	VID      flexString `json:"vid"`
+	VideoID  flexString `json:"video_id"`
+	ItemID   flexString `json:"item_id"`
+	VIDIndex flexInt    `json:"vid_index"`
+	Index    flexInt    `json:"index"`
+}
+
+func (e appSeriesEpisode) id() string {
+	for _, cand := range []flexString{e.VID, e.VideoID, e.ItemID} {
+		if s := strings.TrimSpace(string(cand)); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func (e appSeriesEpisode) order() int {
+	if e.VIDIndex != 0 {
+		return int(e.VIDIndex)
+	}
+	return int(e.Index)
+}
+
+type appSeriesVideoData struct {
+	SeriesIDStr flexString         `json:"series_id_str"`
+	SeriesID    flexString         `json:"series_id"`
+	Title       string             `json:"series_title"`
+	Name        string             `json:"series_name"`
+	Intro       string             `json:"series_intro"`
+	Cover       string             `json:"series_cover"`
+	Episodes    flexInt            `json:"episode_cnt"`
+	RightText   string             `json:"episode_right_text"`
+	AlbumID     flexString         `json:"related_album_id"`
+	VideoList   []appSeriesEpisode `json:"video_list"`
+}
+
+func episodesViaAppVideoDetail(ctx context.Context, seriesID string) (*Detail, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"series_id": seriesID,
+		"biz_param": map[string]any{
+			"caller_scene":              "single_col",
+			"detail_page_version":       0,
+			"from_video_id":             "",
+			"need_all_video_definition": false,
+			"need_mp4_align":            false,
+			"source":                    4,
+			"video_id_type":             1,
+		},
+	})
+	api := activeProfile().raw.Playback.AppAPIBase + videoDetailPath
+	body, err := signedJSON(ctx, api, payload)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Code flexString `json:"code"`
+		Data struct {
+			VideoData appSeriesVideoData `json:"video_data"`
+		} `json:"data"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.UseNumber()
+	if err := dec.Decode(&res); err != nil || (res.Code != "" && res.Code != "0") {
+		return nil, errors.New("剧集详情接口响应无效")
+	}
+	return parseAppSeriesVideoData(seriesID, res.Data.VideoData)
+}
+
+func episodesViaAppPreload(ctx context.Context, seriesID string) (*Detail, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"biz_param": map[string]any{
+			"detail_page_version": 0, "disable_digg_stat": false, "need_all_video_definition": false,
+			"need_mp4_align": false, "screen_width_px": "900", "source": 7, "use_os_player": false, "use_server_dns": false,
+		},
+		"dr_scene": "preload", "series_id": seriesID,
+	})
+	api := activeProfile().raw.Playback.AppAPIBase + multiVideoDetailPreloadPath
+	body, err := signedJSON(ctx, api, payload)
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Code flexString `json:"code"`
+		Data map[string]struct {
+			VideoData appSeriesVideoData `json:"video_data"`
+		} `json:"data"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.UseNumber()
+	if err := dec.Decode(&res); err != nil || (res.Code != "" && res.Code != "0") {
+		return nil, errors.New("剧集预加载接口响应无效")
+	}
+	entry, ok := res.Data[seriesID]
+	if !ok {
+		return nil, errors.New("剧集预加载接口未返回该剧集")
+	}
+	return parseAppSeriesVideoData(seriesID, entry.VideoData)
+}
+
+func parseAppSeriesVideoData(seriesID string, v appSeriesVideoData) (*Detail, error) {
+	gotID := strings.TrimSpace(string(v.SeriesIDStr))
+	if gotID == "" {
+		gotID = strings.TrimSpace(string(v.SeriesID))
+	}
+	if gotID != "" && gotID != seriesID {
+		return nil, errors.New("剧集详情接口返回了其他剧集")
+	}
+	if len(v.VideoList) == 0 {
+		return nil, errors.New("剧集详情接口未返回分集")
+	}
+	type indexedEp struct {
+		id    string
+		order int
+		pos   int
+	}
+	items := make([]indexedEp, 0, len(v.VideoList))
+	hasOrder := false
+	for i, ep := range v.VideoList {
+		id := ep.id()
+		if !vidPattern.MatchString(id) {
+			continue
+		}
+		ord := ep.order()
+		if ord != 0 {
+			hasOrder = true
+		}
+		items = append(items, indexedEp{id: id, order: ord, pos: i})
+	}
+	if len(items) == 0 {
+		return nil, errors.New("分集数据异常")
+	}
+	if hasOrder {
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].order != items[j].order {
+				return items[i].order < items[j].order
+			}
+			return items[i].pos < items[j].pos
+		})
+	}
+	vids := make([]string, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for _, it := range items {
+		if seen[it.id] {
+			continue
+		}
+		seen[it.id] = true
+		vids = append(vids, it.id)
+	}
+	title := strings.TrimSpace(v.Title)
+	if title == "" {
+		title = strings.TrimSpace(v.Name)
+	}
+	epCount := int(v.Episodes)
+	if epCount < len(vids) {
+		epCount = len(vids)
+	}
+	label := strings.TrimSpace(v.RightText)
+	if label == "" && epCount > 0 {
+		label = fmt.Sprintf("全%d集", epCount)
+	}
+	albumID := strings.TrimSpace(string(v.AlbumID))
+	if !seriesIDPattern.MatchString(albumID) || albumID == "0" {
+		albumID = ""
+	}
+	return &Detail{
+		Series: Series{
+			ID:           seriesID,
+			Title:        title,
+			Cover:        ohgSafeCoverURL(v.Cover),
+			Intro:        strings.TrimSpace(v.Intro),
+			EpisodeCount: epCount,
+			EpisodeLabel: label,
+		},
+		VIDs:    vids,
+		AlbumID: albumID,
+	}, nil
 }
 
 func episodesFrom(ctx context.Context, u, seriesID string) (*Detail, error) {
@@ -329,8 +547,9 @@ func episodesFrom(ctx context.Context, u, seriesID string) (*Detail, error) {
 		var data struct {
 			SeriesDetail struct {
 				rawSeries
-				VIDList    []json.RawMessage `json:"vid_list"`
-				SeasonInfo struct {
+				AccessibleEpisodeCnt flexInt           `json:"accessible_episode_cnt"`
+				VIDList              []json.RawMessage `json:"vid_list"`
+				SeasonInfo           struct {
 					GroupID flexString `json:"series_group_id"`
 				} `json:"season_info"`
 			} `json:"seriesDetail"`
@@ -349,9 +568,15 @@ func episodesFrom(ctx context.Context, u, seriesID string) (*Detail, error) {
 		for _, v := range sd.VIDList {
 			vid := strings.Trim(string(v), `"`)
 			if !vidPattern.MatchString(vid) {
+				if strings.HasPrefix(vid, "v1_") {
+					return nil, errors.New("官网分集编号已混淆")
+				}
 				return nil, errors.New("分集数据异常")
 			}
 			d.VIDs = append(d.VIDs, vid)
+		}
+		if sd.AccessibleEpisodeCnt > 0 && int(sd.EpisodeCnt) > len(d.VIDs) && len(d.VIDs) <= int(sd.AccessibleEpisodeCnt) {
+			return nil, errors.New("官网仅返回试看分集")
 		}
 		if d.EpisodeCount == 0 {
 			d.EpisodeCount = len(d.VIDs)

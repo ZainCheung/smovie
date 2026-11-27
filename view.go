@@ -85,6 +85,11 @@ func (a *app) view(c *ui.Context) {
 		a.detailsDialog(c)
 	})
 	a.syncSettings()
+	if a.pendingToast != "" {
+		msg := a.pendingToast
+		a.pendingToast = ""
+		c.Toast(msg)
+	}
 }
 
 // navBar floats over the page: clear over the banner, solid once the page
@@ -123,27 +128,40 @@ func (a *app) navBar(c *ui.Context, scrolled float32) {
 			a.navTab(c, "mylist", "我的片单")
 		})
 		ui.Spacer(c)
-		hist := ui.ButtonBase(c.Key("nav-history")).Size(32, 32).Radius(16).Center().Label("观看记录").Tooltip("观看记录")
-		histOn := a.page == "history" || (a.page == "watch" && a.backTo == "history")
-		hist.Background(withAlpha(colorWhite, uint8(30*b2f(hist.Hovered()))))
-		hist.Children(func() {
-			ui.Icon(c, iconClock).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[histOn || hist.Hovered()])
+		ui.Row(c.Key("nav-tools")).Gap(12).AlignItems(ui.Center).Children(func() {
+			a.navUpdateButton(c)
+
+			searchBtn := ui.ButtonBase(c.Key("nav-search")).Size(32, 32).Radius(16).Center().Label("搜索").Tooltip("搜索")
+			searchOn := a.page == "search" || (a.page == "watch" && a.backTo == "search")
+			searchBtn.Background(withAlpha(colorWhite, uint8(30*b2f(searchBtn.Hovered()))))
+			searchBtn.Children(func() {
+				ui.Icon(c, iconSearch).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[searchOn || searchBtn.Hovered()])
+			})
+			if searchBtn.Clicked() {
+				a.openSearch(c)
+			}
+
+			hist := ui.ButtonBase(c.Key("nav-history")).Size(32, 32).Radius(16).Center().Label("观看记录").Tooltip("观看记录")
+			histOn := a.page == "history" || (a.page == "watch" && a.backTo == "history")
+			hist.Background(withAlpha(colorWhite, uint8(30*b2f(hist.Hovered()))))
+			hist.Children(func() {
+				ui.Icon(c, iconClock).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[histOn || hist.Hovered()])
+			})
+			if hist.Clicked() {
+				a.go_("history")
+				a.scroll("history").Y = 0
+			}
+
+			gear := ui.ButtonBase(c.Key("nav-settings")).Size(32, 32).Radius(16).Center().Label("设置").Tooltip("设置")
+			gearOn := a.page == "settings"
+			gear.Background(withAlpha(colorWhite, uint8(30*b2f(gear.Hovered()))))
+			gear.Children(func() {
+				ui.Icon(c, iconGear).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[gearOn || gear.Hovered()])
+			})
+			if gear.Clicked() {
+				a.go_("settings")
+			}
 		})
-		if hist.Clicked() {
-			a.go_("history")
-			a.scroll("history").Y = 0
-		}
-		gear := ui.ButtonBase(c.Key("nav-settings")).Size(32, 32).Radius(16).Center().Label("设置").Tooltip("设置")
-		gearOn := a.page == "settings"
-		gear.Background(withAlpha(colorWhite, uint8(30*b2f(gear.Hovered()))))
-		gear.Children(func() {
-			ui.Icon(c, iconGear).Size(20, 20).TextColor(map[bool]ui.Color{true: colorWhite, false: colorMuted}[gearOn || gear.Hovered()])
-		})
-		if gear.Clicked() {
-			a.go_("settings")
-		}
-		ui.SearchField(c.Key("search"), &a.query).Placeholder("片名、题材、演员").Label("搜索").Width(240).
-			OnSubmit(func() { a.search(a.query) })
 	})
 }
 

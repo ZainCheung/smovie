@@ -203,7 +203,18 @@ func Episode(ctx context.Context, seriesID, vid string) (*EpisodeInfo, error) {
 		} `json:"episodeSocialInfo"`
 	}
 	raw, ok := router.LoaderData["player_(series_id)/(vid)/page"]
-	if !ok || json.Unmarshal(raw, &data) != nil || data.SeriesID != seriesID {
+	if !ok {
+		// The website migrated player episode URLs to obfuscated v1_ tokens;
+		// numeric App VIDs now render only the layout shell without page data.
+		if _, hasLayout := router.LoaderData["player_(series_id)/(vid)/layout"]; hasLayout {
+			return nil, ErrLocked
+		}
+		if _, hasLayout := router.LoaderData["player_layout"]; hasLayout {
+			return nil, ErrLocked
+		}
+		return nil, errors.New("页面未找到分集信息")
+	}
+	if json.Unmarshal(raw, &data) != nil || data.SeriesID != seriesID {
 		return nil, errors.New("页面未找到分集信息")
 	}
 	// A locked episode sends to the first one, with pc_locked_episode.
